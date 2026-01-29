@@ -698,7 +698,9 @@ class DEVONthinkInterface:
         if item.year:
             tags_list.append(str(item.year))
         
-        tags_applescript = ', '.join([f'"{tag.replace('"', '\\"')}"' for tag in tags_list if tag])
+        # Format tags for AppleScript (Python 3.9 compatible)
+        escaped_tags = ['"' + tag.replace('"', '\\"') + '"' for tag in tags_list if tag]
+        tags_applescript = ', '.join(escaped_tags)
         
         script = f'''
         tell application "DEVONthink 3"

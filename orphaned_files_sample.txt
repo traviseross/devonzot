@@ -1,0 +1,13 @@
+# Orphaned PDFs in Zotero storage that need processing
+# These are stored attachments (linkMode=0) that should be converted to linked UUID references
+
+/Users/travisross/Zotero/storage/7RAW3VWE/Irigoin et al. - 2025 - China inside out Explaining silver flows in the triangular trade, c . 1820s‒70s.pdf
+/Users/travisross/Zotero/storage/6EG9JEZB/Loporcaro et al. - 2023 - Regional Legacy Effects on Radically Innovative Ne.pdf
+/Users/travisross/Zotero/storage/3Q94WEH5/Dearnley_Feather_2002_The UK bookselling trade without resale price maintenance an overview of change.pdf
+/Users/travisross/Zotero/storage/SS9XHFNS/National_Bibliographies_in_the_Digital_Age_Guidanc.pdf
+/Users/travisross/Zotero/storage/CQR5TVAR/women-and-the-stream-of-thought-1919.pdf
+/Users/travisross/Zotero/storage/BBK548SW/Proposals -  Bradford Bible.pdf
+/Users/travisross/Zotero/storage/7CZGBCWZ/Cook - Finding His Mark.pdf
+/Users/travisross/Zotero/storage/3PAUR5SZ/Arbour - Canvassing Books.pdf
+/Users/travisross/Zotero/storage/2T38J7TS/Baidis et al_2019_Creating Competitive Advantage.pdf
+/Users/travisross/Zotero/storage/XEVI3X87/Popp - 2020 - Introduction.pdf
