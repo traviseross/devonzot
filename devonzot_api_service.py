@@ -20,12 +20,15 @@ import requests
 from typing import List, Dict, Optional, Any
 from dataclasses import dataclass
 from pathlib import Path
+from dotenv import load_dotenv
 import subprocess
 from datetime import datetime
 
 # Configuration
-ZOTERO_API_KEY = "Iy9J3VIgfoXUHrHIGkRgzTEJ"
-ZOTERO_USER_ID = "617019"
+load_dotenv(Path(__file__).resolve().parent / '.env')
+
+ZOTERO_API_KEY = os.environ["ZOTERO_API_KEY"]
+ZOTERO_USER_ID = os.environ["ZOTERO_USER_ID"]
 ZOTERO_API_BASE = "https://api.zotero.org"
 API_VERSION = "3"
 RATE_LIMIT_DELAY = 1.0  # Seconds between API calls

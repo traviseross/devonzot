@@ -91,6 +91,18 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+### Configure Credentials
+
+```bash
+# Copy the template and fill in your private Zotero values
+cp .env.example .env
+open .env
+```
+
+- `ZOTERO_API_KEY` and `ZOTERO_USER_ID` stay in `.env`, which remains ignored by git.
+- All CLI tools now call `python-dotenv` automatically, so credentials load without extra flags once the file exists.
+- Rotate keys by editing `.env`; no Python changes required.
+
 ### First Run (Dry Run Recommended)
 
 ```bash
@@ -273,11 +285,12 @@ python3 devonzot_service.py --once
 - **Zotero 6+**: SQLite database structure
 
 ### Python Packages
-```txt
-# See requirements.txt
-# Core: asyncio, sqlite3, subprocess, json, pathlib
-# All standard library - no external dependencies
-```
+- psutil - process supervision utilities used by the controllers
+- requests - Zotero Web API calls for the API-first toolchain
+- python-dotenv - loads .env credentials for every standalone script
+- pytest (dev only) - keeps the regression harness runnable locally
+
+> ⚠️ The old "no external dependencies" note is outdated. Always run pip install -r requirements.txt after pulling.
 
 ## 🔐 Security & Privacy
 

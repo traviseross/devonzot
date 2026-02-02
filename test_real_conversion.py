@@ -4,12 +4,17 @@ Live test conversion with real DEVONthink match
 """
 
 import asyncio
+import os
 import requests
+from pathlib import Path
+from dotenv import load_dotenv
 from datetime import datetime
 
+load_dotenv(Path(__file__).resolve().parent / '.env')
+
 # Your API setup
-ZOTERO_API_KEY = "Iy9J3VIgfoXUHrHIGkRgzTEJ" 
-ZOTERO_USER_ID = "617019"
+ZOTERO_API_KEY = os.environ['ZOTERO_API_KEY']
+ZOTERO_USER_ID = os.environ['ZOTERO_USER_ID']
 ZOTERO_API_BASE = "https://api.zotero.org"
 
 headers = {

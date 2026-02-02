@@ -6,19 +6,23 @@ Runs safely in background, never deletes anything
 """
 
 import asyncio
+import os
 import json
 import logging
 import time
 import requests
 from typing import List, Dict, Optional
 from pathlib import Path
+from dotenv import load_dotenv
 import subprocess
 from datetime import datetime
 import re
 
 # Configuration
-ZOTERO_API_KEY = "Iy9J3VIgfoXUHrHIGkRgzTEJ"
-ZOTERO_USER_ID = "617019"
+load_dotenv(Path(__file__).resolve().parent / '.env')
+
+ZOTERO_API_KEY = os.environ["ZOTERO_API_KEY"]
+ZOTERO_USER_ID = os.environ["ZOTERO_USER_ID"]
 ZOTERO_API_BASE = "https://api.zotero.org"
 API_VERSION = "3"
 RATE_LIMIT_DELAY = 2.0  # Slower for continuous operation

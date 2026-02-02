@@ -105,7 +105,7 @@
   ],
   "restart_count": 0,
   "dry_run_results": {
-    "timestamp": "2026-01-27T23:18:13.853431",
+    "timestamp": "2026-02-02T10:15:02.614126",
     "conflicts": {
       "filename_collisions": [
         {
@@ -389,14 +389,14 @@
     },
     "migration_analysis": {
       "stored_attachments": 267,
-      "zotfile_symlinks": 6162,
+      "zotfile_symlinks": 6158,
       "storage_size_bytes": 0,
       "problematic_paths": []
     },
     "sync_analysis": {
       "items_needing_sync": 100,
       "items_with_devonthink_links": 0,
-      "last_sync": null,
+      "last_sync": "2026-01-29T23:13:36.111117",
       "estimated_sync_time_minutes": 50.0
     }
   }

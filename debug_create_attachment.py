@@ -4,10 +4,15 @@ Debug API attachment creation response
 """
 import requests
 import json
+import os
+from pathlib import Path
+from dotenv import load_dotenv
 
 # API setup
-ZOTERO_API_KEY = "Iy9J3VIgfoXUHrHIGkRgzTEJ"
-ZOTERO_USER_ID = "617019" 
+load_dotenv(Path(__file__).resolve().parent / '.env')
+
+ZOTERO_API_KEY = os.environ["ZOTERO_API_KEY"]
+ZOTERO_USER_ID = os.environ["ZOTERO_USER_ID"] 
 ZOTERO_API_BASE = "https://api.zotero.org"
 
 headers = {

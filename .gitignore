@@ -24,3 +24,5 @@ logs/
 last_sync.txt
 zotero_devonthink_mappings.jsonl
 *.sqlite-backup
+.env
+sync_state.json
