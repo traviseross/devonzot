@@ -45,6 +45,31 @@ DEVONzot transforms fragile ZotFile symlinks into robust UUID-based integration,
 └─────────────────┘    └──────────────────┘    └─────────────────┘
 ```
 
+## 🔌 API + Controller Toolkit (v3)
+
+While the flagship service still talks directly to the Zotero SQLite database, this branch also ships a full API-driven toolchain that runs safely while Zotero stays open. Use it when you need a "set and forget" background sync without touching the database file.
+
+### Core API Services
+- **devonzot_api_service.py** – Experimental all-API converter with smart DEVONthink search, inspection reports, and batch conversion helpers.
+- **devonzot_safe_api.py** – Adds atomic state saves, rolling backups, and resume hooks for long-running API jobs.
+- **devonzot_inspector.py / demo_inspection.py / show_api_results.py** – Quick inspection utilities for reviewing API reachability and recent conversions.
+
+### Two-Process Automation
+- **devonzot_creator.py** – Continuously scans for linked-file attachments, finds DEVONthink UUID matches, and creates safe linked-URL copies.
+- **devonzot_cleaner.py** – Verifies redundant items (file + UUID) and removes only the obsolete ZotFile symlinks once the UUID link is confirmed.
+- **devonzot_sync_controller.py** – Async supervisor that launches creator/cleaner daemons, restarts them if they crash, and centralizes logging.
+- **devonzot_controller.py** – Simpler controller with manual start/status/test modes if you prefer classic subprocess supervision.
+- **start_sync.sh / stop_sync.sh** – Friendly wrappers to launch or halt the controller plus any lingering child processes.
+
+### Maintenance + Safety Utilities
+- **check_attachments.py / attachment_pairs.json** – Track every legacy->UUID mapping for audits and reruns.
+- **cleanup_and_confirm.py / cleanup_attachments.py** – Remove junk DEVONthink-tagged attachments, confirm deletions, and reset test data.
+- **debug_api.py / debug_create_attachment.py** – Narrow-scope repro scripts for the Zotero API linkMode limitations.
+- **results_summary.py / safety_analysis.py** – Narrative reports comparing the SQLite vs API approaches and documenting interruption-handling plans.
+- **test_api_conversion.py / test_real_conversion.py / devonzot_add_new.py / devonzot_safe_api.py** – Focused test harnesses for proving new UUID conversions before running the full daemon.
+
+> 💡 Tip: Run ./start_sync.sh once, tail creator.log or cleaner.log for live progress, and ./stop_sync.sh to halt everything cleanly.
+
 ## 🚀 Quick Start
 
 ### Prerequisites
