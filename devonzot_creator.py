@@ -23,18 +23,18 @@ load_dotenv(Path(__file__).resolve().parent / '.env')
 
 ZOTERO_API_KEY = os.environ["ZOTERO_API_KEY"]
 ZOTERO_USER_ID = os.environ["ZOTERO_USER_ID"]
-ZOTERO_API_BASE = "https://api.zotero.org"
-API_VERSION = "3"
-RATE_LIMIT_DELAY = 2.0  # Slower for continuous operation
-BATCH_SIZE = 5  # Small batches for continuous processing
-CYCLE_DELAY = 60  # Wait between cycles (seconds)
+ZOTERO_API_BASE = os.environ.get("ZOTERO_API_BASE", "https://api.zotero.org")
+API_VERSION = os.environ.get("API_VERSION", "3")
+RATE_LIMIT_DELAY = float(os.environ.get("RATE_LIMIT_DELAY", 2.0))
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", 5))
+CYCLE_DELAY = int(os.environ.get("CYCLE_DELAY", 60))
 
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - CREATOR - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('/Users/travisross/DEVONzot/creator.log'),
+        logging.FileHandler(os.environ.get("CREATOR_LOG_PATH", "creator.log")),
         logging.StreamHandler()
     ]
 )

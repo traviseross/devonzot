@@ -24,16 +24,16 @@ load_dotenv(Path(__file__).resolve().parent / '.env')
 
 ZOTERO_API_KEY = os.environ["ZOTERO_API_KEY"]
 ZOTERO_USER_ID = os.environ["ZOTERO_USER_ID"]
-ZOTERO_API_BASE = "https://api.zotero.org"
-API_VERSION = "3"
-RATE_LIMIT_DELAY = 1.0
+ZOTERO_API_BASE = os.environ.get("ZOTERO_API_BASE", "https://api.zotero.org")
+API_VERSION = os.environ.get("API_VERSION", "3")
+RATE_LIMIT_DELAY = float(os.environ.get("RATE_LIMIT_DELAY", 1.0))
 
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('/Users/travisross/DEVONzot/api_v2_service.log'),
+        logging.FileHandler(os.environ.get("ADDNEW_LOG_PATH", "api_v2_service.log")),
         logging.StreamHandler()
     ]
 )
@@ -234,7 +234,7 @@ class DEVONzotAddNewService:
     def __init__(self):
         self.zotero = ZoteroAPIClient(ZOTERO_API_KEY, ZOTERO_USER_ID)
         self.devonthink = DEVONthinkAPIInterface()
-        self.callback_file = Path('/Users/travisross/DEVONzot/attachment_pairs.json')
+        self.callback_file = Path(os.environ.get("ATTACHMENT_PAIRS_PATH", "attachment_pairs.json"))
         self.load_attachment_pairs()
     
     def load_attachment_pairs(self):
