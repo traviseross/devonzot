@@ -26,3 +26,4 @@ zotero_devonthink_mappings.jsonl
 *.sqlite-backup
 .env
 sync_state.json
+DEVONzot.code-workspace
