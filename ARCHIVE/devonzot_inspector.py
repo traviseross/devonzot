@@ -65,9 +65,44 @@ class ZoteroAPIClient:
         })
         self.modified_items = []
     
-    def _rate_limit(self):
+    def _rate_limit(self, seconds=None):
         """Respect API rate limits"""
-        time.sleep(RATE_LIMIT_DELAY)
+        time.sleep(seconds if seconds is not None else RATE_LIMIT_DELAY)
+        def _safe_request(self, method: str, url: str, **kwargs):
+            """API request with rate limiting, backoff, and retry-after handling"""
+            max_retries = 5
+            delay = RATE_LIMIT_DELAY
+            for attempt in range(max_retries):
+                response = None
+                try:
+                    response = self.session.request(method, url, timeout=30, **kwargs)
+                except Exception as e:
+                    logger.error(f"API request failed: {e}")
+                    time.sleep(delay)
+                    continue
+
+                # Handle Backoff header
+                backoff = response.headers.get("Backoff")
+                if backoff:
+                    logger.warning(f"Received Backoff header: waiting {backoff} seconds")
+                    time.sleep(float(backoff))
+
+                # Handle Retry-After header (429/503 or any response)
+                if response.status_code in (429, 503):
+                    retry_after = response.headers.get("Retry-After")
+                    if retry_after:
+                        logger.warning(f"Rate limited ({response.status_code}): waiting {retry_after} seconds")
+                        time.sleep(float(retry_after))
+                    else:
+                        logger.warning(f"Rate limited ({response.status_code}): exponential backoff {delay} seconds")
+                        time.sleep(delay)
+                        delay = min(delay * 2, 60)
+                    continue
+
+                # If not rate limited, return response
+                return response
+            logger.error("Max retries reached for Zotero API request.")
+            return None
     
     def get_attachment_batch(self, start: int = 0, limit: int = 50) -> List[Dict]:
         """Get a batch of attachments from API"""

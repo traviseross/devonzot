@@ -68,9 +68,9 @@ class ZoteroAPIClient:
         })
         self.attachment_pairs = []
     
-    def _rate_limit(self):
+    def _rate_limit(self, seconds=None):
         """Respect API rate limits"""
-        time.sleep(RATE_LIMIT_DELAY)
+        time.sleep(seconds if seconds is not None else RATE_LIMIT_DELAY)
     
     def get_attachment_batch(self, start: int = 0, limit: int = 50) -> List[Dict]:
         """Get batch of file attachments needing UUID conversion"""
@@ -101,45 +101,69 @@ class ZoteroAPIClient:
         
         return response.json() if response.status_code == 200 else None
     
-    def create_url_attachment(self, parent_key: str, title: str, url: str) -> Optional[str]:
-        """Create new URL attachment and return its key"""
-        self._rate_limit()
-        
-        attachment_data = {
-            "itemType": "attachment",
-            "parentItem": parent_key,
-            "linkMode": "linked_url",
-            "title": title,  # Use original title without prefix
-            "url": url,
-            "contentType": "application/pdf"
-            # No tags - keep it clean
-        }
-        
+    def create_url_attachments(self, attachments: list) -> list:
+        """Batch create new URL attachments. Each item in attachments is a dict with parent_key, title, url."""
+        batch = [
+            {
+                "itemType": "attachment",
+                "parentItem": att["parent_key"],
+                "linkMode": "linked_url",
+                "title": att["title"],
+                "url": att["url"],
+                "contentType": "application/pdf"
+            }
+            for att in attachments
+        ]
         url_endpoint = f'{ZOTERO_API_BASE}/users/{self.user_id}/items'
-        response = self.session.post(url_endpoint, json=[attachment_data])
-        
-        if response.status_code == 200:
+        response = self._safe_request('POST', url_endpoint, json=batch)
+        results = []
+        if response and response.status_code == 200:
             created_items = response.json()
-            
-            # Try different response formats
-            new_key = None
-            
-            # Format 1: successful["0"]["key"]
-            if created_items.get('successful') and '0' in created_items['successful']:
-                new_key = created_items['successful']['0']['key']
-            
-            # Format 2: success["0"]
-            elif created_items.get('success') and '0' in created_items['success']:
-                new_key = created_items['success']['0']
-            
-            if new_key:
-                logger.info(f"✅ Created UUID attachment: {title} (key: {new_key})")
-                return new_key
-            else:
-                logger.error(f"Could not extract key from response: {created_items}")
+            for idx, att in enumerate(attachments):
+                key = None
+                if created_items.get('successful') and str(idx) in created_items['successful']:
+                    key = created_items['successful'][str(idx)]['key']
+                results.append({"input": att, "new_key": key})
         else:
-            logger.error(f"API error creating attachment: {response.status_code} - {response.text}")
-        
+            logger.error(f"Batch create failed: {response.status_code if response else 'No response'}")
+            for att in attachments:
+                results.append({"input": att, "new_key": None})
+        return results
+
+    def _safe_request(self, method: str, url: str, **kwargs):
+        """API request with rate limiting, backoff, and retry-after handling"""
+        max_retries = 5
+        delay = RATE_LIMIT_DELAY
+        for attempt in range(max_retries):
+            response = None
+            try:
+                response = self.session.request(method, url, timeout=30, **kwargs)
+            except Exception as e:
+                logger.error(f"API request failed: {e}")
+                time.sleep(delay)
+                continue
+
+            # Handle Backoff header
+            backoff = response.headers.get("Backoff")
+            if backoff:
+                logger.warning(f"Received Backoff header: waiting {backoff} seconds")
+                time.sleep(float(backoff))
+
+            # Handle Retry-After header (429/503 or any response)
+            if response.status_code in (429, 503):
+                retry_after = response.headers.get("Retry-After")
+                if retry_after:
+                    logger.warning(f"Rate limited ({response.status_code}): waiting {retry_after} seconds")
+                    time.sleep(float(retry_after))
+                else:
+                    logger.warning(f"Rate limited ({response.status_code}): exponential backoff {delay} seconds")
+                    time.sleep(delay)
+                    delay = min(delay * 2, 60)
+                continue
+
+            # If not rate limited, return response
+            return response
+        logger.error("Max retries reached for Zotero API request.")
         return None
     
     def delete_attachment(self, attachment_key: str, version: int) -> bool:
@@ -279,30 +303,17 @@ class DEVONzotAddNewService:
             logger.error(f"Error saving attachment pairs: {e}")
     
     async def add_uuid_attachments(self, max_items: int = 10) -> Dict[str, int]:
-        """Add new UUID attachments for file attachments"""
+        """Add new UUID attachments for file attachments using batching"""
         logger.info(f"🔗 Adding UUID attachments for up to {max_items} file attachments...")
-        
         results = {'added': 0, 'error': 0, 'skipped': 0}
-        
         try:
             # Get file attachments that don't already have UUID counterparts
             items = self.zotero.get_attachment_batch(start=0, limit=100)
-            
             candidates = []
             for item_data in items:
                 data = item_data.get('data', {})
-                
-                if (data.get('linkMode') == 'linked_file' and 
-                    data.get('path') and 
-                    data.get('parentItem')):
-                    
-                    # Check if we already created a UUID attachment for this
-                    existing_pair = next(
-                        (p for p in self.zotero.attachment_pairs 
-                         if p.old_key == data.get('key')), 
-                        None
-                    )
-                    
+                if (data.get('linkMode') == 'linked_file' and data.get('path') and data.get('parentItem')):
+                    existing_pair = next((p for p in self.zotero.attachment_pairs if p.old_key == data.get('key')), None)
                     if not existing_pair:
                         candidates.append({
                             'key': data.get('key', ''),
@@ -311,67 +322,76 @@ class DEVONzotAddNewService:
                             'path': data.get('path', ''),
                             'parent_key': data.get('parentItem')
                         })
-            
             logger.info(f"Found {len(candidates)} new candidates for UUID attachment creation")
-            
-            # Process candidates
+            # Search DEVONthink for UUIDs
+            batch_to_create = []
+            candidate_map = {}
             for candidate in candidates[:max_items]:
                 try:
-                    # Search DEVONthink
                     uuid = await self.devonthink.search_for_item_async(candidate['title'])
-                    
                     if uuid:
-                        # Get parent item info
-                        parent_item = self.zotero.get_item(candidate['parent_key'])
-                        parent_title = "Unknown"
-                        if parent_item:
-                            parent_title = parent_item.get('data', {}).get('title', 'Unknown')
-                        
-                        # Create new UUID attachment
-                        new_url = f"x-devonthink-item://{uuid}"
-                        new_key = self.zotero.create_url_attachment(
-                            candidate['parent_key'],
-                            candidate['title'],
-                            new_url
-                        )
-                        
-                        if new_key:
-                            # Track this pair
-                            pair = AttachmentPair(
-                                old_key=candidate['key'],
-                                old_title=candidate['title'],
-                                old_path=candidate['path'],
-                                new_key=new_key,
-                                new_url=new_url,
-                                parent_key=candidate['parent_key'],
-                                parent_title=parent_title,
-                                uuid=uuid,
-                                timestamp=datetime.now().isoformat()
-                            )
-                            
-                            self.zotero.attachment_pairs.append(pair)
-                            results['added'] += 1
-                            
-                            logger.info(f"📎 Added UUID attachment for: {candidate['title']}")
-                        else:
-                            results['error'] += 1
+                        batch_to_create.append({
+                            "parent_key": candidate['parent_key'],
+                            "title": candidate['title'],
+                            "url": f"x-devonthink-item://{uuid}"
+                        })
+                        candidate_map[candidate['title']] = (candidate, uuid)
                     else:
                         logger.warning(f"❌ No DEVONthink match: {candidate['title']}")
                         results['skipped'] += 1
-                    
-                    await asyncio.sleep(1)
-                    
+                    await asyncio.sleep(0.1)
                 except Exception as e:
                     logger.error(f"Error processing {candidate['key']}: {e}")
                     results['error'] += 1
-            
+            # Batch create UUID attachments
+            if batch_to_create:
+                batch_results = self.zotero.create_url_attachments(batch_to_create)
+                changed_files = []
+                for res in batch_results:
+                    candidate, uuid = candidate_map.get(res['input']['title'], (None, None))
+                    if res['new_key'] and candidate:
+                        parent_item = self.zotero.get_item(candidate['parent_key'])
+                        parent_title = parent_item.get('data', {}).get('title', 'Unknown') if parent_item else 'Unknown'
+                        pair = AttachmentPair(
+                            old_key=candidate['key'],
+                            old_title=candidate['title'],
+                            old_path=candidate['path'],
+                            new_key=res['new_key'],
+                            new_url=res['input']['url'],
+                            parent_key=candidate['parent_key'],
+                            parent_title=parent_title,
+                            uuid=uuid,
+                            timestamp=datetime.now().isoformat()
+                        )
+                        self.zotero.attachment_pairs.append(pair)
+                        results['added'] += 1
+                        logger.info(f"📎 Added UUID attachment for: {candidate['title']}")
+                        changed_files.append({
+                            'title': candidate['title'],
+                            'old_key': candidate['key'],
+                            'new_key': res['new_key'],
+                            'parent_key': candidate['parent_key'],
+                            'timestamp': pair.timestamp
+                        })
+                        # Delete previous linked file attachment immediately
+                        old_item = self.zotero.get_item(candidate['key'])
+                        if old_item:
+                            version = old_item.get('data', {}).get('version', 0)
+                            if self.zotero.delete_attachment(candidate['key'], version):
+                                logger.info(f"🗑️ Deleted old file attachment: {candidate['key']}")
+                                pair.old_deleted = True
+                    else:
+                        results['error'] += 1
+                # Write changed files to a log for inspection
+                if changed_files:
+                    with open('changed_files_log.json', 'a') as f:
+                        for entry in changed_files:
+                            f.write(json.dumps(entry) + '\n')
             # Save results
             self.save_attachment_pairs()
-            
         except Exception as e:
             logger.error(f"Error in add process: {e}")
             results['error'] += 1
-        
         return results
     
     def show_confirmation_report(self):
@@ -481,12 +501,26 @@ async def main():
     parser.add_argument('--review', action='store_true', help='Review attachment pairs created')
     parser.add_argument('--confirm', action='store_true', help='Confirm UUID attachments and delete old files')
     parser.add_argument('--rollback', action='store_true', help='Rollback - delete UUID attachments')
-    
+    parser.add_argument('--loop15', action='store_true', help='Run batch every 2 minutes for 15 minutes')
+
     args = parser.parse_args()
-    
+
     service = DEVONzotAddNewService()
-    
-    if args.add > 0:
+
+    if args.loop15:
+        import time
+        start = time.time()
+        end = start + 15*60
+        cycle = 1
+        while time.time() < end:
+            logger.info(f"⏳ Loop cycle {cycle} (15-min watch mode)")
+            results = await service.add_uuid_attachments(max_items=3)
+            print(f"Cycle {cycle}: Added={results['added']} Skipped={results['skipped']} Errors={results['error']}")
+            cycle += 1
+            if time.time() < end:
+                time.sleep(120)
+        print("15-minute loop complete.")
+    elif args.add > 0:
         logger.info(f"🔗 Adding UUID attachments for {args.add} items...")
         results = await service.add_uuid_attachments(max_items=args.add)
         print(f"\n{'='*40}")
@@ -496,10 +530,8 @@ async def main():
         print(f"Skipped: {results['skipped']}")
         print(f"Errors: {results['error']}")
         print(f"{'='*40}")
-        
     elif args.review:
         service.show_confirmation_report()
-        
     elif args.confirm:
         logger.info("✅ Confirming UUID attachments and cleaning up...")
         results = await service.confirm_and_cleanup()
@@ -510,7 +542,6 @@ async def main():
         print(f"Deleted: {results['deleted']}")
         print(f"Errors: {results['error']}")
         print(f"{'='*40}")
-        
     elif args.rollback:
         logger.info("🔄 Rolling back UUID attachments...")
         results = await service.rollback_uuid_attachments()
@@ -520,13 +551,13 @@ async def main():
         print(f"Rolled back: {results['rolled_back']}")
         print(f"Errors: {results['error']}")
         print(f"{'='*40}")
-        
     else:
         print("Usage:")
         print("  --add N      Add UUID attachments for N file attachments")
         print("  --review     Review attachment pairs and get confirmation links")
         print("  --confirm    Confirm UUID attachments work and delete old files")
         print("  --rollback   Delete UUID attachments and keep original files")
+        print("  --loop15     Run batch every 2 minutes for 15 minutes (watch mode)")
 
 if __name__ == "__main__":
     asyncio.run(main())

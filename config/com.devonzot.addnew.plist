@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.devonzot.addnew</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/travisross/DEVONzot/venv/bin/python</string>
+        <string>/Users/travisross/DEVONzot/devonzot_add_new.py</string>
+        <string>--loop15</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/travisross/DEVONzot</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/travisross/DEVONzot/launchd_stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/travisross/DEVONzot/launchd_stderr.log</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>

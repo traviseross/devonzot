@@ -117,13 +117,40 @@ class ZoteroCreatorAPI:
         })
     
     def _safe_request(self, method: str, url: str, **kwargs):
-        """API request with rate limiting"""
-        time.sleep(RATE_LIMIT_DELAY)
-        try:
-            return self.session.request(method, url, timeout=30, **kwargs)
-        except Exception as e:
-            logger.error(f"API request failed: {e}")
-            return None
+        """API request with rate limiting, backoff, and retry-after handling"""
+        max_retries = 5
+        delay = RATE_LIMIT_DELAY
+        for attempt in range(max_retries):
+            response = None
+            try:
+                response = self.session.request(method, url, timeout=30, **kwargs)
+            except Exception as e:
+                logger.error(f"API request failed: {e}")
+                time.sleep(delay)
+                continue
+
+            # Handle Backoff header
+            backoff = response.headers.get("Backoff")
+            if backoff:
+                logger.warning(f"Received Backoff header: waiting {backoff} seconds")
+                time.sleep(float(backoff))
+
+            # Handle Retry-After header (429/503 or any response)
+            if response.status_code in (429, 503):
+                retry_after = response.headers.get("Retry-After")
+                if retry_after:
+                    logger.warning(f"Rate limited ({response.status_code}): waiting {retry_after} seconds")
+                    time.sleep(float(retry_after))
+                else:
+                    logger.warning(f"Rate limited ({response.status_code}): exponential backoff {delay} seconds")
+                    time.sleep(delay)
+                    delay = min(delay * 2, 60)
+                continue
+
+            # If not rate limited, return response
+            return response
+        logger.error("Max retries reached for Zotero API request.")
+        return None
     
     def get_file_attachments_needing_uuids(self, limit: int = 50) -> List[Dict]:
         """Get file attachments that don't have UUID counterparts yet"""
@@ -170,26 +197,34 @@ class ZoteroCreatorAPI:
         
         return candidates
     
-    def create_uuid_attachment(self, parent_key: str, title: str, uuid_url: str) -> Optional[str]:
-        """Create new UUID attachment"""
-        attachment_data = {
-            "itemType": "attachment",
-            "parentItem": parent_key,
-            "linkMode": "linked_url",
-            "title": title,
-            "url": uuid_url,
-            "contentType": "application/pdf"
-        }
-        
-        response = self._safe_request('POST', f'{ZOTERO_API_BASE}/users/{self.user_id}/items', json=[attachment_data])
-        
+    def create_uuid_attachments(self, attachments: list) -> list:
+        """Batch create new UUID attachments. Each item in attachments is a dict with parent_key, title, uuid_url."""
+        batch = [
+            {
+                "itemType": "attachment",
+                "parentItem": att["parent_key"],
+                "linkMode": "linked_url",
+                "title": att["title"],
+                "url": att["uuid_url"],
+                "contentType": "application/pdf"
+            }
+            for att in attachments
+        ]
+        response = self._safe_request('POST', f'{ZOTERO_API_BASE}/users/{self.user_id}/items', json=batch)
+        results = []
         if response and response.status_code == 200:
             created_items = response.json()
-            if created_items.get('successful') and '0' in created_items['successful']:
-                new_key = created_items['successful']['0']['key']
-                return new_key
-        
-        return None
+            # Map results by index
+            for idx, att in enumerate(attachments):
+                key = None
+                if created_items.get('successful') and str(idx) in created_items['successful']:
+                    key = created_items['successful'][str(idx)]['key']
+                results.append({"input": att, "new_key": key})
+        else:
+            logger.error(f"Batch create failed: {response.status_code if response else 'No response'}")
+            for att in attachments:
+                results.append({"input": att, "new_key": None})
+        return results
     
     def get_parent_title(self, parent_key: str) -> str:
         """Get parent item title"""
@@ -208,59 +243,52 @@ class ContinuousCreator:
         self.running = False
     
     async def process_batch(self) -> Dict[str, int]:
-        """Process one batch of file attachments"""
+        """Process one batch of file attachments using batching"""
         results = {'created': 0, 'skipped': 0, 'errors': 0}
-        
         try:
             # Get file attachments needing UUIDs
             candidates = self.zotero.get_file_attachments_needing_uuids(BATCH_SIZE * 2)
-            
             if not candidates:
                 logger.debug("No file attachments needing UUID conversion found")
                 return results
-            
             logger.info(f"Processing {len(candidates)} candidates...")
-            
-            # Process up to BATCH_SIZE items
+            # Search DEVONthink for UUIDs in parallel (sequentially for now)
+            batch_to_create = []
+            candidate_map = {}
             for candidate in candidates[:BATCH_SIZE]:
                 if not self.running:
                     break
-                
                 try:
-                    # Search DEVONthink
                     uuid = await self.devonthink.search_for_item_async(candidate['title'])
-                    
                     if uuid:
-                        # Create UUID attachment
-                        uuid_url = f"x-devonthink-item://{uuid}"
-                        new_key = self.zotero.create_uuid_attachment(
-                            candidate['parent_key'],
-                            candidate['title'],
-                            uuid_url
-                        )
-                        
-                        if new_key:
-                            parent_title = self.zotero.get_parent_title(candidate['parent_key'])
-                            logger.info(f"✅ Created UUID attachment: {candidate['title'][:50]}... for '{parent_title[:30]}...'")
-                            results['created'] += 1
-                        else:
-                            logger.warning(f"❌ Failed to create UUID attachment for: {candidate['title'][:50]}...")
-                            results['errors'] += 1
+                        batch_to_create.append({
+                            "parent_key": candidate['parent_key'],
+                            "title": candidate['title'],
+                            "uuid_url": f"x-devonthink-item://{uuid}"
+                        })
+                        candidate_map[candidate['title']] = candidate
                     else:
                         logger.debug(f"❓ No DEVONthink match: {candidate['title'][:50]}...")
                         results['skipped'] += 1
-                    
-                    # Small delay between items
-                    await asyncio.sleep(1)
-                    
+                    await asyncio.sleep(0.1)
                 except Exception as e:
                     logger.error(f"Error processing {candidate['key']}: {e}")
                     results['errors'] += 1
-                    
+            # Batch create UUID attachments
+            if batch_to_create:
+                batch_results = self.zotero.create_uuid_attachments(batch_to_create)
+                for res in batch_results:
+                    candidate = candidate_map.get(res['input']['title'])
+                    if res['new_key']:
+                        parent_title = self.zotero.get_parent_title(candidate['parent_key']) if candidate else ''
+                        logger.info(f"✅ Created UUID attachment: {res['input']['title'][:50]}... for '{parent_title[:30]}...'")
+                        results['created'] += 1
+                    else:
+                        logger.warning(f"❌ Failed to create UUID attachment for: {res['input']['title'][:50]}...")
+                        results['errors'] += 1
         except Exception as e:
             logger.error(f"Error in batch processing: {e}")
             results['errors'] += 1
-        
         return results
     
     async def run_continuous(self):

@@ -1,3 +1,101 @@
+# DEVONzot: Automated Zotero–DEVONthink Attachment Sync
+
+## Overview
+DEVONzot automates the process of linking Zotero attachments with DEVONthink, ensuring every Zotero file attachment has a unique UUID and is properly tracked. It supports batching, rate limit handling, logging, and can run continuously as a background service (launchd on macOS).
+
+---
+
+## Features
+- Batch creation of UUID-linked attachments in Zotero
+- Robust Zotero API rate limit handling
+- Logging of all changes for audit and troubleshooting
+- Immediate deletion of old attachments after migration
+- Continuous operation via loop mode or macOS launchd
+- Secure configuration via `.env` file
+
+---
+
+## Installation
+
+### 1. Clone the Repository
+```
+git clone https://github.com/yourusername/DEVONzot.git
+cd DEVONzot
+```
+
+### 2. Set Up Python Environment
+It is recommended to use a virtual environment:
+```
+python3 -m venv venv
+source venv/bin/activate
+```
+
+### 3. Install Dependencies
+```
+pip install -r requirements.txt
+```
+
+### 4. Configure Environment Variables
+Copy `.env.example` to `.env` and fill in your Zotero API credentials and other settings:
+```
+cp .env.example .env
+# Edit .env with your editor
+```
+
+### 5. (Optional) Add to .gitignore
+`.env` is already in `.gitignore` for security.
+
+---
+
+## Usage
+
+### One-Time Batch Run
+Run the script to process a batch of attachments:
+```
+python devonzot_add_new.py
+```
+
+### Continuous 15-Minute Watch Mode
+Run in loop mode to process new attachments every 15 minutes:
+```
+python devonzot_add_new.py --loop15
+```
+
+### Logging
+- All changes are logged in `changed_files_log.json`.
+- Operational logs are written to `api_v2_service.log`.
+
+---
+
+## Running as a Background Service (macOS launchd)
+
+1. Edit the provided `com.devonzot.addnew.plist` if needed (update paths for your system).
+2. Copy it to your LaunchAgents folder:
+    ```
+    cp com.devonzot.addnew.plist ~/Library/LaunchAgents/
+    ```
+3. Load the service:
+    ```
+    launchctl load ~/Library/LaunchAgents/com.devonzot.addnew.plist
+    ```
+4. Logs will be written to `launchd_stdout.log` and `launchd_stderr.log` in your DEVONzot directory.
+
+---
+
+## Troubleshooting
+- Check `.env` for correct API keys and settings.
+- Review `api_v2_service.log` and `changed_files_log.json` for errors or progress.
+- If the script stalls, check for API rate limits or increase log verbosity.
+
+---
+
+## Contributing
+Pull requests and issues are welcome!
+
+---
+
+## License
+See LICENSE for details.
 # DEVONzot v1.0.0
 
 🔗 **Invisible, Bulletproof Zotero-DEVONthink Integration**
