@@ -1,3 +1,8 @@
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from .env file (absolute path)
+load_dotenv('/Users/travisross/DEVONzot/.env')
 #!/usr/bin/env python3
 """
 DEVONzot API Service v2.0 - Add New URL Attachments

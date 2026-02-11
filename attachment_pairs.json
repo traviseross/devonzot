@@ -362,5 +362,44 @@
     "timestamp": "2026-02-10T16:49:21.973165",
     "confirmed": false,
     "old_deleted": true
+  },
+  {
+    "old_key": "IZI5QCAH",
+    "old_title": "Chigbu et al - The Science of Literature Reviews - 2023 - Journal Article.pdf",
+    "old_path": "/Users/travisross/ZotFile Import/Chigbu et al - The Science of Literature Reviews - 2023 - Journal Article.pdf",
+    "new_key": "MR3JDGT6",
+    "new_url": "x-devonthink-item://AE4A5C47-478E-4868-91BA-368EE3762553",
+    "parent_key": "FUU83QAL",
+    "parent_title": "The Science of Literature Reviews: Searching, Identifying, Selecting, and Synthesising",
+    "uuid": "AE4A5C47-478E-4868-91BA-368EE3762553",
+    "timestamp": "2026-02-10T22:30:23.097693",
+    "confirmed": false,
+    "old_deleted": true
+  },
+  {
+    "old_key": "3JYEREK4",
+    "old_title": "Nordholt et al - Introduction to Classics in the History of the African Humanities - 2024 - Journal Article.pdf",
+    "old_path": "/Users/travisross/ZotFile Import/Nordholt et al - Introduction to Classics in the History of the African Humanities - 2024 - Journal Article.pdf",
+    "new_key": "QJQP5QB9",
+    "new_url": "x-devonthink-item://4F151426-6438-419D-B7E2-9AD64E9769CB",
+    "parent_key": "SQPFT6HL",
+    "parent_title": "Introduction to Classics in the History of the African Humanities",
+    "uuid": "4F151426-6438-419D-B7E2-9AD64E9769CB",
+    "timestamp": "2026-02-10T22:30:30.257067",
+    "confirmed": false,
+    "old_deleted": true
+  },
+  {
+    "old_key": "PGBP4ZK4",
+    "old_title": "Clark - The Huckster in the Parlor - 1973 - Journal Article.pdf",
+    "old_path": "/Users/travisross/ZotFile Import/Clark - The Huckster in the Parlor - 1973 - Journal Article.pdf",
+    "new_key": "5KXA28DP",
+    "new_url": "x-devonthink-item://8CDAFA88-FB45-4BD5-87D1-B1A4C8284B6F",
+    "parent_key": "CBU4T27C",
+    "parent_title": "The Huckster in the Parlor",
+    "uuid": "8CDAFA88-FB45-4BD5-87D1-B1A4C8284B6F",
+    "timestamp": "2026-02-10T22:30:37.275689",
+    "confirmed": false,
+    "old_deleted": true
   }
 ]

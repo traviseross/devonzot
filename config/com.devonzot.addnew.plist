@@ -7,7 +7,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/Users/travisross/DEVONzot/venv/bin/python</string>
-        <string>/Users/travisross/DEVONzot/devonzot_add_new.py</string>
+        <string>/Users/travisross/DEVONzot/src/devonzot_add_new.py</string>
         <string>--loop15</string>
     </array>
     <key>WorkingDirectory</key>
