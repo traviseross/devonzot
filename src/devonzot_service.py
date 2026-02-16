@@ -610,7 +610,7 @@ class DEVONthinkInterface:
         await asyncio.sleep(DEVONTHINK_WAIT_TIME)
         
         # Search across all databases
-        databases = ["Professional", "Articles", "Books", "Research"]
+        databases = ["Global Inbox", "Professional", "Articles", "Books", "Research"]
         
         for db_name in databases:
             uuid = self._search_database_for_filename(filename, db_name)
@@ -1061,73 +1061,310 @@ class DEVONzotService:
         print("\n" + "="*60)
     
     def migrate_stored_attachments(self, dry_run=False) -> Dict[str, int]:
-        """Migrate Zotero stored files to DEVONthink"""
+        """Migrate Zotero stored files to DEVONthink with comprehensive tracking"""
         logger.info("📁 Starting migration of stored attachments...")
-        
-        results = {'success': 0, 'error': 0, 'skipped': 0}
-        
+
+        # Enhanced results tracking
+        results = {
+            'success': 0,
+            'error': 0,
+            'skipped': 0,
+            'skipped_file_missing': 0,
+            'skipped_path_invalid': 0,
+            'skipped_no_parent': 0,
+            'skipped_parent_not_found': 0,
+            'skipped_already_processed': 0
+        }
+
+        skipped_details = []  # Track details for reporting
+
         attachments = self.zotero_db.get_stored_attachments()
-        logger.info(f"Found {len(attachments)} stored attachments to migrate")
-        
+        logger.info(f"📊 Detection Summary: Found {len(attachments)} stored attachments (linkMode=0)")
+
         for attachment in attachments:
             try:
+                # Skip if already processed
+                if attachment.parent_item_id and attachment.parent_item_id in self.state.processed_items:
+                    results['skipped_already_processed'] += 1
+                    continue
+
                 # Resolve file path
                 file_path = self._resolve_storage_path(attachment)
-                if not file_path or not file_path.exists():
-                    logger.warning(f"File not found: {attachment.path}")
+                if not file_path:
+                    reason = "Invalid or unresolvable path"
+                    logger.warning(f"⚠️  Attachment {attachment.item_id}: {reason} - {attachment.path}")
+                    results['skipped_path_invalid'] += 1
                     results['skipped'] += 1
+                    skipped_details.append({
+                        'item_id': attachment.item_id,
+                        'reason': reason,
+                        'path': attachment.path
+                    })
                     continue
-                
+
+                if not file_path.exists():
+                    reason = "File missing on disk"
+                    logger.warning(f"⚠️  Attachment {attachment.item_id}: {reason} - {file_path}")
+                    results['skipped_file_missing'] += 1
+                    results['skipped'] += 1
+                    skipped_details.append({
+                        'item_id': attachment.item_id,
+                        'reason': reason,
+                        'path': str(file_path)
+                    })
+                    continue
+
                 # Get parent item metadata
                 if not attachment.parent_item_id:
-                    logger.warning(f"Attachment {attachment.item_id} has no parent item")
+                    reason = "No parent item (orphaned attachment)"
+                    logger.warning(f"⚠️  Attachment {attachment.item_id}: {reason}")
+                    results['skipped_no_parent'] += 1
                     results['skipped'] += 1
+                    skipped_details.append({
+                        'item_id': attachment.item_id,
+                        'reason': reason,
+                        'path': attachment.path
+                    })
                     continue
-                
+
                 parent_item = self.zotero_db.get_item_by_id(attachment.parent_item_id)
                 if not parent_item:
-                    logger.warning(f"Parent item {attachment.parent_item_id} not found")
+                    reason = f"Parent item {attachment.parent_item_id} not found in database"
+                    logger.warning(f"⚠️  Attachment {attachment.item_id}: {reason}")
+                    results['skipped_parent_not_found'] += 1
                     results['skipped'] += 1
+                    skipped_details.append({
+                        'item_id': attachment.item_id,
+                        'reason': reason,
+                        'path': attachment.path,
+                        'parent_id': attachment.parent_item_id
+                    })
                     continue
-                
+
                 # Generate filename
                 filename = FilenameGenerator.generate_filename(parent_item)
-                
+                logger.info(f"📎 Processing attachment {attachment.item_id}: {filename}")
+
                 # Copy to DEVONthink Inbox
                 if self.devonthink.copy_file_to_inbox(str(file_path), filename, dry_run):
                     # Wait and search for UUID
                     dt_uuid = self.devonthink.find_item_by_filename_after_wait(filename, dry_run)
-                    
+
                     if dt_uuid:
                         # Update Zotero to use DEVONthink UUID
                         if self.zotero_db.update_item_url(attachment.parent_item_id, dt_uuid, dry_run):
                             # Update DEVONthink metadata
                             if self.devonthink.update_item_metadata(dt_uuid, parent_item, dry_run):
                                 results['success'] += 1
-                                logger.info(f"Migrated attachment {attachment.item_id} → {dt_uuid}")
-                                
+                                logger.info(f"✅ Migrated attachment {attachment.item_id} → {dt_uuid}")
+
                                 # Track processed item
                                 if attachment.parent_item_id not in self.state.processed_items:
                                     self.state.processed_items.append(attachment.parent_item_id)
                             else:
                                 results['error'] += 1
+                                logger.error(f"❌ Failed to update DEVONthink metadata for {attachment.item_id}")
                         else:
                             results['error'] += 1
+                            logger.error(f"❌ Failed to update Zotero URL for {attachment.item_id}")
                     else:
                         results['error'] += 1
+                        logger.error(f"❌ Failed to find DEVONthink UUID for {attachment.item_id}")
                 else:
                     results['error'] += 1
-                
+                    logger.error(f"❌ Failed to copy file to inbox for {attachment.item_id}")
+
                 # Small delay between operations
                 if not dry_run:
                     time.sleep(2)
-                
+
             except Exception as e:
-                logger.error(f"Failed to migrate attachment {attachment.item_id}: {e}")
+                logger.error(f"❌ Failed to migrate attachment {attachment.item_id}: {e}")
                 results['error'] += 1
-        
+
+        # Write skip report
+        if skipped_details and not dry_run:
+            skip_report_file = DEVONZOT_PATH / "skipped_attachments.json"
+            try:
+                with open(skip_report_file, 'w') as f:
+                    json.dump({
+                        'timestamp': datetime.now().isoformat(),
+                        'total_skipped': len(skipped_details),
+                        'details': skipped_details
+                    }, f, indent=2)
+                logger.info(f"📄 Skip report saved to: {skip_report_file}")
+            except Exception as e:
+                logger.error(f"Failed to write skip report: {e}")
+
+        # Log summary
+        logger.info(f"\n📊 Migration Summary:")
+        logger.info(f"  ✅ Success: {results['success']}")
+        logger.info(f"  ❌ Errors: {results['error']}")
+        logger.info(f"  ⏭️  Skipped: {results['skipped']} total")
+        logger.info(f"     - File missing: {results['skipped_file_missing']}")
+        logger.info(f"     - Invalid path: {results['skipped_path_invalid']}")
+        logger.info(f"     - No parent: {results['skipped_no_parent']}")
+        logger.info(f"     - Parent not found: {results['skipped_parent_not_found']}")
+        logger.info(f"     - Already processed: {results['skipped_already_processed']}")
+
         return results
-    
+
+    def migrate_zotfile_attachments(self, dry_run=False) -> Dict[str, int]:
+        """Migrate ZotFile-managed linked files (linkMode=2) to DEVONthink
+
+        This handles files stored in ZotFile Import or other locations that are
+        linked to Zotero items but not yet imported to DEVONthink.
+        """
+        logger.info("📁 Starting migration of ZotFile linked attachments...")
+
+        # Enhanced results tracking
+        results = {
+            'success': 0,
+            'error': 0,
+            'skipped': 0,
+            'skipped_file_missing': 0,
+            'skipped_path_invalid': 0,
+            'skipped_no_parent': 0,
+            'skipped_parent_not_found': 0,
+            'skipped_already_processed': 0
+        }
+
+        skipped_details = []
+
+        # Get ZotFile linked attachments (linkMode=2)
+        attachments = self.zotero_db.get_zotfile_symlinks()
+        logger.info(f"📊 Detection Summary: Found {len(attachments)} ZotFile linked attachments (linkMode=2)")
+
+        for attachment in attachments:
+            try:
+                # Skip if already processed
+                if attachment.parent_item_id and attachment.parent_item_id in self.state.processed_items:
+                    results['skipped_already_processed'] += 1
+                    continue
+
+                # Resolve file path (linkMode=2 uses absolute paths)
+                if not attachment.path:
+                    reason = "No path specified"
+                    logger.warning(f"⚠️  Attachment {attachment.item_id}: {reason}")
+                    results['skipped_path_invalid'] += 1
+                    results['skipped'] += 1
+                    skipped_details.append({
+                        'item_id': attachment.item_id,
+                        'reason': reason,
+                        'path': None
+                    })
+                    continue
+
+                file_path = Path(attachment.path)
+
+                # Skip if file doesn't exist
+                if not file_path.exists():
+                    reason = "File missing on disk"
+                    logger.warning(f"⚠️  Attachment {attachment.item_id}: {reason} - {file_path}")
+                    results['skipped_file_missing'] += 1
+                    results['skipped'] += 1
+                    skipped_details.append({
+                        'item_id': attachment.item_id,
+                        'reason': reason,
+                        'path': str(file_path)
+                    })
+                    continue
+
+                # Get parent item metadata
+                if not attachment.parent_item_id:
+                    reason = "No parent item (orphaned attachment)"
+                    logger.warning(f"⚠️  Attachment {attachment.item_id}: {reason}")
+                    results['skipped_no_parent'] += 1
+                    results['skipped'] += 1
+                    skipped_details.append({
+                        'item_id': attachment.item_id,
+                        'reason': reason,
+                        'path': str(file_path)
+                    })
+                    continue
+
+                parent_item = self.zotero_db.get_item_by_id(attachment.parent_item_id)
+                if not parent_item:
+                    reason = f"Parent item {attachment.parent_item_id} not found in database"
+                    logger.warning(f"⚠️  Attachment {attachment.item_id}: {reason}")
+                    results['skipped_parent_not_found'] += 1
+                    results['skipped'] += 1
+                    skipped_details.append({
+                        'item_id': attachment.item_id,
+                        'reason': reason,
+                        'path': str(file_path),
+                        'parent_id': attachment.parent_item_id
+                    })
+                    continue
+
+                # Generate filename from metadata
+                filename = FilenameGenerator.generate_filename(parent_item)
+                logger.info(f"📎 Processing ZotFile attachment {attachment.item_id}: {filename}")
+
+                # Copy to DEVONthink Inbox
+                if self.devonthink.copy_file_to_inbox(str(file_path), filename, dry_run):
+                    # Wait and search for UUID
+                    dt_uuid = self.devonthink.find_item_by_filename_after_wait(filename, dry_run)
+
+                    if dt_uuid:
+                        # Update Zotero to use DEVONthink UUID
+                        if self.zotero_db.update_item_url(attachment.parent_item_id, dt_uuid, dry_run):
+                            # Update DEVONthink metadata
+                            if self.devonthink.update_item_metadata(dt_uuid, parent_item, dry_run):
+                                results['success'] += 1
+                                logger.info(f"✅ Migrated ZotFile attachment {attachment.item_id} → {dt_uuid}")
+
+                                # Track processed item
+                                if attachment.parent_item_id not in self.state.processed_items:
+                                    self.state.processed_items.append(attachment.parent_item_id)
+                            else:
+                                results['error'] += 1
+                                logger.error(f"❌ Failed to update DEVONthink metadata for {attachment.item_id}")
+                        else:
+                            results['error'] += 1
+                            logger.error(f"❌ Failed to update Zotero URL for {attachment.item_id}")
+                    else:
+                        results['error'] += 1
+                        logger.error(f"❌ Failed to find DEVONthink UUID for {attachment.item_id}")
+                else:
+                    results['error'] += 1
+                    logger.error(f"❌ Failed to copy file to inbox for {attachment.item_id}")
+
+                # Small delay between operations
+                if not dry_run:
+                    time.sleep(2)
+
+            except Exception as e:
+                logger.error(f"❌ Failed to migrate ZotFile attachment {attachment.item_id}: {e}")
+                results['error'] += 1
+
+        # Write skip report
+        if skipped_details and not dry_run:
+            skip_report_file = DEVONZOT_PATH / "skipped_zotfile_attachments.json"
+            try:
+                with open(skip_report_file, 'w') as f:
+                    json.dump({
+                        'timestamp': datetime.now().isoformat(),
+                        'total_skipped': len(skipped_details),
+                        'details': skipped_details
+                    }, f, indent=2)
+                logger.info(f"📄 ZotFile skip report saved to: {skip_report_file}")
+            except Exception as e:
+                logger.error(f"Failed to write ZotFile skip report: {e}")
+
+        # Log summary
+        logger.info(f"\n📊 ZotFile Migration Summary:")
+        logger.info(f"  ✅ Success: {results['success']}")
+        logger.info(f"  ❌ Errors: {results['error']}")
+        logger.info(f"  ⏭️  Skipped: {results['skipped']} total")
+        logger.info(f"     - File missing: {results['skipped_file_missing']}")
+        logger.info(f"     - Invalid path: {results['skipped_path_invalid']}")
+        logger.info(f"     - No parent: {results['skipped_no_parent']}")
+        logger.info(f"     - Parent not found: {results['skipped_parent_not_found']}")
+        logger.info(f"     - Already processed: {results['skipped_already_processed']}")
+
+        return results
+
     async def convert_zotfile_symlinks_async(self, dry_run=False, batch_size=20) -> Dict[str, int]:
         """Convert ZotFile symlinks to DEVONthink UUID links using async batch processing"""
         logger.info("🔗 Converting ZotFile symlinks with async processing...")
@@ -1257,43 +1494,134 @@ class DEVONzotService:
         return results
     
     def _resolve_storage_path(self, attachment: ZoteroAttachment) -> Optional[Path]:
-        """Resolve Zotero storage path to actual file"""
-        if not attachment.path or not attachment.path.startswith("storage:"):
+        """Resolve Zotero storage path to actual file location
+
+        Supports multiple path formats:
+        - storage:KEY:filename.pdf (standard format)
+        - KEY:filename.pdf (without storage: prefix)
+        - KEY/filename.pdf (forward slash variant)
+
+        Validates storage key format (8-char alphanumeric) and file existence.
+        """
+        if not attachment.path:
             return None
-        
-        parts = attachment.path.split(":")
-        if len(parts) >= 3:
-            key = parts[1]
-            filename = ":".join(parts[2:])
-            return Path(ZOTERO_STORAGE_PATH) / key / filename
-        
+
+        path = attachment.path
+        storage_base = Path(ZOTERO_STORAGE_PATH)
+
+        # Format 1: storage:KEY:filename.pdf (standard)
+        if path.startswith("storage:"):
+            parts = path.split(":")
+            if len(parts) >= 3:
+                key = parts[1]
+                filename = ":".join(parts[2:])
+
+                # Validate storage key format (should be 8 uppercase alphanumeric)
+                if re.match(r'^[A-Z0-9]{8}$', key):
+                    resolved = storage_base / key / filename
+                    if resolved.exists():
+                        return resolved
+                    else:
+                        logger.debug(f"Storage path resolved but file missing: {resolved}")
+                        return None
+                else:
+                    logger.warning(f"Malformed storage path (invalid key '{key}'): {path}")
+                    return None
+            else:
+                logger.warning(f"Malformed storage path (missing key/filename): {path}")
+                return None
+
+        # Format 2: KEY:filename.pdf (without storage: prefix)
+        elif ":" in path and not path.startswith("/"):
+            parts = path.split(":", 1)
+            if len(parts) == 2:
+                key, filename = parts
+                if re.match(r'^[A-Z0-9]{8}$', key):
+                    resolved = storage_base / key / filename
+                    if resolved.exists():
+                        logger.info(f"Resolved non-standard path format: {path} -> {resolved}")
+                        return resolved
+                    else:
+                        logger.debug(f"Non-standard path resolved but file missing: {resolved}")
+                        return None
+
+        # Format 3: KEY/filename.pdf (forward slash variant)
+        elif "/" in path and not path.startswith("/"):
+            parts = path.split("/", 1)
+            if len(parts) == 2:
+                key, filename = parts
+                if re.match(r'^[A-Z0-9]{8}$', key):
+                    resolved = storage_base / key / filename
+                    if resolved.exists():
+                        logger.info(f"Resolved slash-format path: {path} -> {resolved}")
+                        return resolved
+                    else:
+                        logger.debug(f"Slash-format path resolved but file missing: {resolved}")
+                        return None
+
+        # Format 4: Absolute path (for linkMode=1,2,3 - not for storage)
+        elif path.startswith("/"):
+            absolute_path = Path(path)
+            if absolute_path.exists():
+                return absolute_path
+            else:
+                logger.debug(f"Absolute path file missing: {path}")
+                return None
+
+        logger.debug(f"Unable to resolve path: {path}")
         return None
     
     async def run_service_cycle_async(self, dry_run=False) -> bool:
         """Run one complete service cycle with async processing"""
         logger.info("🔄 Running async service cycle...")
-        
+
         try:
-            # Phase 1: Migrate stored attachments (synchronous - file operations)
+            # Phase 1A: Migrate stored attachments from Zotero storage (linkMode=0)
+            logger.info("\n" + "="*70)
+            logger.info("PHASE 1A: Migrating linkMode=0 (Zotero storage) attachments")
+            logger.info("="*70)
             migration_results = self.migrate_stored_attachments(dry_run)
-            logger.info(f"Migration: {migration_results}")
-            
-            # Phase 2: Convert ZotFile symlinks (async batch processing)
+            logger.info(f"Phase 1A complete: {migration_results}")
+
+            # Phase 1B: Migrate ZotFile linked attachments (linkMode=2)
+            logger.info("\n" + "="*70)
+            logger.info("PHASE 1B: Migrating linkMode=2 (ZotFile Import) attachments")
+            logger.info("="*70)
+            zotfile_migration_results = self.migrate_zotfile_attachments(dry_run)
+            logger.info(f"Phase 1B complete: {zotfile_migration_results}")
+
+            # Phase 2: Convert ZotFile symlinks already in DEVONthink (async batch processing)
+            logger.info("\n" + "="*70)
+            logger.info("PHASE 2: Converting existing ZotFile symlinks to UUID links")
+            logger.info("="*70)
             conversion_results = await self.convert_zotfile_symlinks_async(dry_run, batch_size=50)
-            logger.info(f"Symlink conversion: {conversion_results}")
-            
+            logger.info(f"Phase 2 complete: {conversion_results}")
+
             # Phase 3: Sync new items (synchronous for now)
+            logger.info("\n" + "="*70)
+            logger.info("PHASE 3: Syncing new items")
+            logger.info("="*70)
             sync_results = self.sync_new_items(dry_run)
-            logger.info(f"New items sync: {sync_results}")
-            
+            logger.info(f"Phase 3 complete: {sync_results}")
+
             # Update state
             if not dry_run:
                 self.state.last_sync = datetime.now().isoformat()
-            
+
             self._save_state()
-            
+
+            # Overall summary
+            logger.info("\n" + "="*70)
+            logger.info("🎉 SERVICE CYCLE COMPLETE")
+            logger.info("="*70)
+            logger.info(f"Total Zotero storage (linkMode=0) migrated: {migration_results.get('success', 0)}")
+            logger.info(f"Total ZotFile (linkMode=2) migrated: {zotfile_migration_results.get('success', 0)}")
+            logger.info(f"Total symlinks converted: {conversion_results.get('success', 0)}")
+            logger.info(f"Total new items synced: {sync_results.get('success', 0)}")
+            logger.info("="*70 + "\n")
+
             return True
-            
+
         except Exception as e:
             logger.error(f"Service cycle failed: {e}")
             return False

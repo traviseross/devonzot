@@ -1,3 +1,5 @@
+# VS Code workspace file
+DEVONzot.code-workspace
 # Virtual environment
 venv/
 __pycache__/
