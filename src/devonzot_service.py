@@ -356,7 +356,7 @@ class ZoteroDatabase:
                     ia.path,
                     ia.storageHash
                 FROM itemAttachments ia
-                WHERE ia.linkMode = 0 
+                WHERE ia.linkMode IN (0, 1)
                 AND ia.path IS NOT NULL
                 AND ia.path LIKE 'storage:%'
             """
@@ -1103,13 +1103,14 @@ class DEVONzotService:
             'skipped_path_invalid': 0,
             'skipped_no_parent': 0,
             'skipped_parent_not_found': 0,
-            'skipped_already_processed': 0
+            'skipped_already_processed': 0,
+            'deleted_originals': 0
         }
 
         skipped_details = []  # Track details for reporting
 
         attachments = self.zotero_db.get_stored_attachments()
-        logger.info(f"📊 Detection Summary: Found {len(attachments)} stored attachments (linkMode=0)")
+        logger.info(f"📊 Detection Summary: Found {len(attachments)} stored attachments (linkMode=0,1)")
 
         for attachment in attachments:
             try:
@@ -1206,6 +1207,21 @@ class DEVONzotService:
                             if attachment.parent_item_id not in self.state.processed_items:
                                 self.state.processed_items.append(attachment.parent_item_id)
                                 self._save_state()
+
+                            # Clean up original from Zotero storage
+                            if not dry_run:
+                                try:
+                                    file_path.unlink()
+                                    results['deleted_originals'] += 1
+                                    logger.info(f"🗑️  Deleted original: {file_path}")
+                                    # Remove empty storage key directory
+                                    if file_path.parent != Path(ZOTERO_STORAGE_PATH) and not any(file_path.parent.iterdir()):
+                                        file_path.parent.rmdir()
+                                        logger.info(f"🗑️  Removed empty directory: {file_path.parent}")
+                                except Exception as e:
+                                    logger.warning(f"⚠️  Failed to delete original {file_path}: {e}")
+                            else:
+                                logger.info(f"[DRY RUN] Would delete original: {file_path}")
                         else:
                             results['error'] += 1
                             logger.error(f"❌ Failed to update DEVONthink metadata for {attachment.item_id}")
@@ -1241,6 +1257,7 @@ class DEVONzotService:
         # Log summary
         logger.info(f"\n📊 Migration Summary:")
         logger.info(f"  ✅ Success: {results['success']}")
+        logger.info(f"  🗑️  Deleted originals: {results['deleted_originals']}")
         logger.info(f"  ❌ Errors: {results['error']}")
         logger.info(f"  ⏭️  Skipped: {results['skipped']} total")
         logger.info(f"     - File missing: {results['skipped_file_missing']}")
@@ -1268,7 +1285,8 @@ class DEVONzotService:
             'skipped_path_invalid': 0,
             'skipped_no_parent': 0,
             'skipped_parent_not_found': 0,
-            'skipped_already_processed': 0
+            'skipped_already_processed': 0,
+            'deleted_originals': 0
         }
 
         skipped_details = []
@@ -1374,6 +1392,21 @@ class DEVONzotService:
                             if attachment.parent_item_id not in self.state.processed_items:
                                 self.state.processed_items.append(attachment.parent_item_id)
                                 self._save_state()
+
+                            # Clean up original from ZotFile storage
+                            if not dry_run:
+                                try:
+                                    file_path.unlink()
+                                    results['deleted_originals'] += 1
+                                    logger.info(f"🗑️  Deleted original: {file_path}")
+                                    # Remove empty parent directory
+                                    if not any(file_path.parent.iterdir()):
+                                        file_path.parent.rmdir()
+                                        logger.info(f"🗑️  Removed empty directory: {file_path.parent}")
+                                except Exception as e:
+                                    logger.warning(f"⚠️  Failed to delete original {file_path}: {e}")
+                            else:
+                                logger.info(f"[DRY RUN] Would delete original: {file_path}")
                         else:
                             results['error'] += 1
                             logger.error(f"❌ Failed to update DEVONthink metadata for {attachment.item_id}")
@@ -1409,6 +1442,7 @@ class DEVONzotService:
         # Log summary
         logger.info(f"\n📊 ZotFile Migration Summary:")
         logger.info(f"  ✅ Success: {results['success']}")
+        logger.info(f"  🗑️  Deleted originals: {results['deleted_originals']}")
         logger.info(f"  ❌ Errors: {results['error']}")
         logger.info(f"  ⏭️  Skipped: {results['skipped']} total")
         logger.info(f"     - File missing: {results['skipped_file_missing']}")
