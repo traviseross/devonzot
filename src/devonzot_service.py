@@ -620,7 +620,30 @@ class DEVONthinkInterface:
         
         logger.debug(f"Item not found in any database: {filename}")
         return None
-    
+
+    def find_item_by_filename_after_wait(self, filename: str, dry_run=False) -> Optional[str]:
+        """Synchronous version of find_item_by_filename_after_wait"""
+        if dry_run:
+            logger.info(f"[DRY RUN] Would search for filename '{filename}' after {DEVONTHINK_WAIT_TIME}s wait")
+            return "dry-run-uuid"
+
+        if not self.is_devonthink_running():
+            logger.error("DEVONthink is not running")
+            return None
+
+        logger.debug(f"Waiting {DEVONTHINK_WAIT_TIME} seconds for DEVONthink auto-sort...")
+        time.sleep(DEVONTHINK_WAIT_TIME)
+
+        databases = ["Global Inbox", "Professional", "Articles", "Books", "Research"]
+        for db_name in databases:
+            uuid = self._search_database_for_filename(filename, db_name)
+            if uuid:
+                logger.info(f"Found item in {db_name}: {uuid}")
+                return uuid
+
+        logger.debug(f"Item not found in any database: {filename}")
+        return None
+
     async def batch_search_items(self, filenames: List[str], dry_run=False) -> Dict[str, Optional[str]]:
         """Search for multiple items concurrently"""
         if dry_run:
@@ -647,26 +670,27 @@ class DEVONthinkInterface:
     
     def _search_database_for_filename(self, filename: str, database_name: str) -> Optional[str]:
         """Search specific database for filename"""
-        safe_filename = filename.replace('"', '\\"')
-        
+        safe_filename = filename.replace('"', '\\"').replace('\\', '\\\\')
+
         script = f'''
         tell application "DEVONthink 3"
             try
-                set theDatabase to database "{database_name}"
-                set searchResults to search "name:\\"{safe_filename}\\"" in theDatabase
-                
-                if (count of searchResults) > 0 then
-                    set theRecord to item 1 of searchResults
-                    return uuid of theRecord
-                else
-                    return ""
-                end if
+                tell database "{database_name}"
+                    set searchResults to search "name:\\"{safe_filename}\\""
+
+                    if (count of searchResults) > 0 then
+                        set theRecord to item 1 of searchResults
+                        return uuid of theRecord
+                    else
+                        return ""
+                    end if
+                end tell
             on error
                 return ""
             end try
         end tell
         '''
-        
+
         try:
             result = self.execute_script(script)
             return result if result else None
@@ -939,32 +963,38 @@ class DEVONzotService:
         self.running = False
     
     def run_dry_run(self) -> Dict[str, Any]:
-        """Run comprehensive dry run analysis"""
+        """Run comprehensive dry run analysis, then execute full migration in dry-run mode"""
         logger.info("🧪 Starting comprehensive dry run analysis...")
-        
+
         results = {
             'timestamp': datetime.now().isoformat(),
             'conflicts': {},
             'migration_analysis': {},
             'sync_analysis': {}
         }
-        
+
         # Detect conflicts
         results['conflicts'] = self.conflict_detector.detect_conflicts()
-        
+
         # Analyze migration workload
         results['migration_analysis'] = self._analyze_migration_workload()
-        
+
         # Analyze sync requirements
         results['sync_analysis'] = self._analyze_sync_requirements()
-        
+
         # Save results
         self.state.dry_run_results = results
         self._save_state()
-        
+
         # Report summary
         self._report_dry_run_results(results)
-        
+
+        # Run full migration cycle in dry-run mode (searches DEVONthink, no copies)
+        logger.info("\n" + "="*70)
+        logger.info("🔍 Running full migration cycle in dry-run mode...")
+        logger.info("="*70)
+        self.run_service_cycle(dry_run=True)
+
         return results
     
     def _analyze_migration_workload(self) -> Dict[str, Any]:
@@ -1145,34 +1175,46 @@ class DEVONzotService:
                 filename = FilenameGenerator.generate_filename(parent_item)
                 logger.info(f"📎 Processing attachment {attachment.item_id}: {filename}")
 
-                # Copy to DEVONthink Inbox
-                if self.devonthink.copy_file_to_inbox(str(file_path), filename, dry_run):
-                    # Wait and search for UUID
-                    dt_uuid = self.devonthink.find_item_by_filename_after_wait(filename, dry_run)
-
+                # Check if already in DEVONthink (prevents duplicates)
+                dt_uuid = None
+                for db_name in ["Global Inbox", "Professional", "Articles", "Books", "Research"]:
+                    dt_uuid = self.devonthink._search_database_for_filename(filename, db_name)
                     if dt_uuid:
-                        # Update Zotero to use DEVONthink UUID
-                        if self.zotero_db.update_item_url(attachment.parent_item_id, dt_uuid, dry_run):
-                            # Update DEVONthink metadata
-                            if self.devonthink.update_item_metadata(dt_uuid, parent_item, dry_run):
-                                results['success'] += 1
-                                logger.info(f"✅ Migrated attachment {attachment.item_id} → {dt_uuid}")
+                        prefix = "[DRY RUN] " if dry_run else ""
+                        logger.info(f"{prefix}Found existing DEVONthink item in {db_name} for {filename}: {dt_uuid}")
+                        break
 
-                                # Track processed item
-                                if attachment.parent_item_id not in self.state.processed_items:
-                                    self.state.processed_items.append(attachment.parent_item_id)
-                            else:
-                                results['error'] += 1
-                                logger.error(f"❌ Failed to update DEVONthink metadata for {attachment.item_id}")
-                        else:
-                            results['error'] += 1
-                            logger.error(f"❌ Failed to update Zotero URL for {attachment.item_id}")
+                if not dt_uuid:
+                    # Copy to DEVONthink Inbox
+                    if self.devonthink.copy_file_to_inbox(str(file_path), filename, dry_run):
+                        # Wait and search for UUID
+                        dt_uuid = self.devonthink.find_item_by_filename_after_wait(filename, dry_run)
                     else:
                         results['error'] += 1
-                        logger.error(f"❌ Failed to find DEVONthink UUID for {attachment.item_id}")
+                        logger.error(f"❌ Failed to copy file to inbox for {attachment.item_id}")
+                        continue
+
+                if dt_uuid:
+                    # Update Zotero to use DEVONthink UUID
+                    if self.zotero_db.update_item_url(attachment.parent_item_id, dt_uuid, dry_run):
+                        # Update DEVONthink metadata
+                        if self.devonthink.update_item_metadata(dt_uuid, parent_item, dry_run):
+                            results['success'] += 1
+                            logger.info(f"✅ Migrated attachment {attachment.item_id} → {dt_uuid}")
+
+                            # Track processed item and save immediately
+                            if attachment.parent_item_id not in self.state.processed_items:
+                                self.state.processed_items.append(attachment.parent_item_id)
+                                self._save_state()
+                        else:
+                            results['error'] += 1
+                            logger.error(f"❌ Failed to update DEVONthink metadata for {attachment.item_id}")
+                    else:
+                        results['error'] += 1
+                        logger.error(f"❌ Failed to update Zotero URL for {attachment.item_id}")
                 else:
                     results['error'] += 1
-                    logger.error(f"❌ Failed to copy file to inbox for {attachment.item_id}")
+                    logger.error(f"❌ Failed to find DEVONthink UUID for {attachment.item_id}")
 
                 # Small delay between operations
                 if not dry_run:
@@ -1301,34 +1343,46 @@ class DEVONzotService:
                 filename = FilenameGenerator.generate_filename(parent_item)
                 logger.info(f"📎 Processing ZotFile attachment {attachment.item_id}: {filename}")
 
-                # Copy to DEVONthink Inbox
-                if self.devonthink.copy_file_to_inbox(str(file_path), filename, dry_run):
-                    # Wait and search for UUID
-                    dt_uuid = self.devonthink.find_item_by_filename_after_wait(filename, dry_run)
-
+                # Check if already in DEVONthink (prevents duplicates)
+                dt_uuid = None
+                for db_name in ["Global Inbox", "Professional", "Articles", "Books", "Research"]:
+                    dt_uuid = self.devonthink._search_database_for_filename(filename, db_name)
                     if dt_uuid:
-                        # Update Zotero to use DEVONthink UUID
-                        if self.zotero_db.update_item_url(attachment.parent_item_id, dt_uuid, dry_run):
-                            # Update DEVONthink metadata
-                            if self.devonthink.update_item_metadata(dt_uuid, parent_item, dry_run):
-                                results['success'] += 1
-                                logger.info(f"✅ Migrated ZotFile attachment {attachment.item_id} → {dt_uuid}")
+                        prefix = "[DRY RUN] " if dry_run else ""
+                        logger.info(f"{prefix}Found existing DEVONthink item in {db_name} for {filename}: {dt_uuid}")
+                        break
 
-                                # Track processed item
-                                if attachment.parent_item_id not in self.state.processed_items:
-                                    self.state.processed_items.append(attachment.parent_item_id)
-                            else:
-                                results['error'] += 1
-                                logger.error(f"❌ Failed to update DEVONthink metadata for {attachment.item_id}")
-                        else:
-                            results['error'] += 1
-                            logger.error(f"❌ Failed to update Zotero URL for {attachment.item_id}")
+                if not dt_uuid:
+                    # Copy to DEVONthink Inbox
+                    if self.devonthink.copy_file_to_inbox(str(file_path), filename, dry_run):
+                        # Wait and search for UUID
+                        dt_uuid = self.devonthink.find_item_by_filename_after_wait(filename, dry_run)
                     else:
                         results['error'] += 1
-                        logger.error(f"❌ Failed to find DEVONthink UUID for {attachment.item_id}")
+                        logger.error(f"❌ Failed to copy file to inbox for {attachment.item_id}")
+                        continue
+
+                if dt_uuid:
+                    # Update Zotero to use DEVONthink UUID
+                    if self.zotero_db.update_item_url(attachment.parent_item_id, dt_uuid, dry_run):
+                        # Update DEVONthink metadata
+                        if self.devonthink.update_item_metadata(dt_uuid, parent_item, dry_run):
+                            results['success'] += 1
+                            logger.info(f"✅ Migrated ZotFile attachment {attachment.item_id} → {dt_uuid}")
+
+                            # Track processed item and save immediately
+                            if attachment.parent_item_id not in self.state.processed_items:
+                                self.state.processed_items.append(attachment.parent_item_id)
+                                self._save_state()
+                        else:
+                            results['error'] += 1
+                            logger.error(f"❌ Failed to update DEVONthink metadata for {attachment.item_id}")
+                    else:
+                        results['error'] += 1
+                        logger.error(f"❌ Failed to update Zotero URL for {attachment.item_id}")
                 else:
                     results['error'] += 1
-                    logger.error(f"❌ Failed to copy file to inbox for {attachment.item_id}")
+                    logger.error(f"❌ Failed to find DEVONthink UUID for {attachment.item_id}")
 
                 # Small delay between operations
                 if not dry_run:
@@ -1528,8 +1582,19 @@ class DEVONzotService:
                     logger.warning(f"Malformed storage path (invalid key '{key}'): {path}")
                     return None
             else:
-                logger.warning(f"Malformed storage path (missing key/filename): {path}")
-                return None
+                # Legacy format: storage:filename.pdf (no key directory)
+                # Search across all storage key directories for this filename
+                filename = ":".join(parts[1:])
+                matches = list(storage_base.glob(f"*/{filename}"))
+                if len(matches) == 1:
+                    logger.info(f"Resolved legacy storage path: {path} -> {matches[0]}")
+                    return matches[0]
+                elif len(matches) > 1:
+                    logger.warning(f"Ambiguous legacy storage path (found {len(matches)} matches): {path}")
+                    return matches[0]
+                else:
+                    logger.debug(f"Legacy storage path - file not found in any key directory: {path}")
+                    return None
 
         # Format 2: KEY:filename.pdf (without storage: prefix)
         elif ":" in path and not path.startswith("/"):
