@@ -11,6 +11,9 @@ __pycache__/
 # IDE
 .vscode/
 .idea/
+
+# Claude Code (managed by claude-teams repo)
+.claude/
 *.swp
 *.swo
 
@@ -28,4 +31,17 @@ zotero_devonthink_mappings.jsonl
 *.sqlite-backup
 .env
 sync_state.json
-DEVONzot.code-workspace
+service_state.json
+changed_files_log.json
+attachment_pairs.json
+skipped_attachments.json
+skipped_zotfile_attachments.json
+storage_diagnostics_report.json
+www.zotero.org.har
+
+# Pipeline temp files
+tmp_extractions/
+
+# Test coverage
+htmlcov/
+.coverage

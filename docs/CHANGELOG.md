@@ -2,83 +2,78 @@
 
 All notable changes to DEVONzot will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- ZoteroAPIClient: centralized Web API v3 client (`src/zotero_api_client.py`)
+- WebSocket streaming via Zotero Streaming API (`src/zotero_stream.py`) with configurable polling fallback
+- Phase 0: automated deletion of `linkMode=1` (imported_url) attachments from disk and via API
+- `pending_deletes` resilience queue in `service_state.json` for retrying failed API delete operations across cycles
+- URL-to-DEVONthink pipeline (`src/pipeline_add_url.py`) with Zotero Translation Server integration
+- 4-tier article extraction: newspaper3k + readability-lxml + trafilatura (Tier 0), RSS/Atom feeds (Tier 1), Playwright headless browser (Tier 2, optional), Internet Archive Wayback Machine (Tier 3)
+- Structured exception hierarchy (`src/exceptions.py`): `DEVONzotError`, `ZoteroAPIError`, `ArticleExtractionError`, `DEVONthinkIntegrationError`, `NetworkError`, `TimeoutError`
+- Temp file lifecycle management (`src/cleanup_service.py`)
+- Test suite: 11 test files in `tests/` using pytest, pytest-asyncio, and pytest-mock
+- `src/` package layout replacing root-level scripts
+- `linkMode=0` (imported_file) and `linkMode=1` (imported_url) support alongside existing `linkMode=2`
+
+### Changed
+- Primary Zotero integration: Web API via `ZoteroAPIClient` (was direct SQLite for writes)
+- Zotero can remain running during migration; the Web API does not lock SQLite
+- Dependencies expanded: websockets, newspaper3k, readability-lxml, trafilatura, feedparser, beautifulsoup4, lxml, html2text, extruct
+
+### Removed
+- Direct Zotero SQLite as primary write path (read-only change detection via hash is retained)
+- Root-level script layout (all entry points moved to `src/`)
+
+---
+
 ## [1.0.0] - 2026-01-28
 
-### 🚀 Production Release - Invisible, Bulletproof Integration
+### Production Release
 
 #### Added
-- **Async Performance Optimization**: 12-15x speed improvement through concurrent batch processing
-- **Set-and-Forget Automation**: Complete invisible operation via cron scheduling
-- **Comprehensive State Management**: JSON-based progress tracking across interruptions
-- **Bulletproof Error Handling**: Graceful recovery from all failure scenarios
-- **Production-Ready Service Architecture**: Daemon mode with signal handling
-- **Advanced Conflict Detection**: Pre-migration analysis with filename collision detection
-- **Mobile Workflow Support**: Full iOS/iPadOS integration via DEVONthink To Go
-- **Native macOS Integration**: Spotlight-searchable metadata via extended attributes
+- Async batch processing with concurrent DEVONthink operations (`convert_zotfile_symlinks_async()`)
+- Set-and-forget automation via cron scheduling
+- JSON-based state management with progress tracking across service restarts
+- Graceful error recovery for AppleScript timeouts and transient failures
+- Daemon mode with signal handling
+- Pre-migration conflict detection with filename collision reporting
+- Native macOS metadata integration via extended attributes (`kMDItemAuthors`, `kMDItemTitle`, `kMDItemDescription`)
+- Spotlight-searchable metadata on synced documents
 
-#### Changed  
-- **Migration Performance**: Reduced from 50+ hours to 3-4 hours for 6,162 items
-- **Batch Processing**: 50 concurrent items vs sequential processing
-- **Wait Times**: Optimized from 10s to 3s between operations
-- **Architecture**: Evolved from simple scripts to comprehensive service system
+#### Changed
+- Migration architecture evolved from sequential scripts to a comprehensive async service
+- Batch size: 50 items processed concurrently
+- Processing speed: substantially reduced per-item time compared to sequential operation
 
-#### Technical Achievements
-- **Async Batch Processing**: `convert_zotfile_symlinks_async()` with concurrent DEVONthink searches
-- **State Persistence**: Progress tracking survives service restarts and system reboots  
-- **Change Detection**: Database hash monitoring prevents unnecessary processing
-- **Metadata Intelligence**: Smart archive discovery tags based on collection analysis
-- **UUID-Based Integration**: Permanent `x-devonthink-item://` links replace fragile symlinks
-
-#### Validated Workload
-- **6,162 ZotFile symlinks** ready for conversion
-- **267 stored attachments** identified for migration
-- **1 filename collision** detected and flagged
-- **14 problematic items** flagged for manual review
-- **100 items** requiring metadata sync
-
-#### Performance Metrics
-- **Batch Size**: 50 items processed concurrently
-- **Processing Speed**: ~3 seconds per item (down from 30 seconds)
-- **Memory Efficiency**: Streaming processing for large libraries
-- **Error Recovery**: Graceful handling of AppleScript timeouts and database locks
+#### Technical Details
+- `AsyncZoteroDevonthinkSync`: main orchestration class
+- State persistence via `service_state.json` survives service restarts and reboots
+- Change detection via database hash monitoring prevents unnecessary processing
+- UUID-based integration: permanent `x-devonthink-item://` links replace fragile symlinks
 
 ### Development Evolution
 
 #### v0.1 - Proof of Concept
 - Basic symlink replacement functionality
-- Sequential processing architecture
-- Manual operation required
+- Sequential processing
+- Manual operation only
 
-#### v0.5 - Automation Integration  
+#### v0.5 - Automation Integration
 - Cron job capability
 - Basic error handling
-- State management introduction
+- Initial state management
 
-#### v1.0 - Production Optimization
+#### v1.0 - Production
 - Async batch processing
 - Comprehensive error recovery
-- Invisible operation capability
-- Mobile workflow integration
+- Continuous service mode
 
 ---
 
-### Migration Notes
+### Known Limitations at v1.0.0
 
-If upgrading from earlier versions:
-
-1. **Backup your data**: Both Zotero and DEVONthink libraries
-2. **Run dry-run analysis**: `python3 devonzot_service.py --dry-run`
-3. **Review conflict reports**: Address filename collisions manually
-4. **Monitor first migration**: Check service logs for any issues
-5. **Set up automation**: Configure cron for ongoing sync
-
-### Known Limitations
-
-- **AppleScript Performance**: DEVONthink search operations are inherently sequential
-- **Database Locking**: Zotero must not be running during large migrations  
-- **Filename Conflicts**: Manual resolution required for duplicate filenames
-- **Memory Usage**: Large libraries may require system tuning
-
-### Future Roadmap
-
-See README.md for detailed roadmap including bi-directional sync, attachment import, and multi-library support.
+- **AppleScript performance**: DEVONthink search operations are inherently sequential per call
+- **Database locking**: In v1.0.0, direct SQLite access required Zotero to be closed during large migrations. This constraint was removed in post-v1.0.0 work by switching to the Web API as the primary write path (see [Unreleased] above).
+- **Filename conflicts**: Manual resolution required for duplicate filenames

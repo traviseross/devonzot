@@ -1,246 +1,142 @@
 # Installation Guide
 
-Complete setup instructions for DEVONzot v1.0.0
+## Requirements
 
-## System Requirements
+- macOS 10.15 (Catalina) or later
+- Python 3.8 or later (3.13 recommended)
+- DEVONthink 3 (any edition)
+- Zotero 6 or later
 
-### Hardware Requirements
-- **Mac**: Intel or Apple Silicon (M1/M2)
-- **RAM**: 4GB minimum, 8GB recommended for large libraries
-- **Storage**: 100MB for DEVONzot + space for your document libraries
-- **Network**: Not required (entirely local operation)
+## macOS Permissions
 
-### Software Requirements
-- **macOS**: 10.15 (Catalina) or later
-- **Python**: 3.8 or later (3.13 recommended)
-- **DEVONthink**: DEVONthink 3 (any edition)
-- **Zotero**: Version 6 or later
+### Full Disk Access
 
-### Permissions Setup
+DEVONzot reads Zotero's SQLite database for change detection and accesses attachment files on disk.
 
-#### 1. Full Disk Access (Required)
-DEVONzot needs to read Zotero's database file:
+System Settings > Privacy & Security > Full Disk Access
 
-```bash
-System Preferences → Security & Privacy → Privacy → Full Disk Access
-```
-Add Terminal.app and/or your Python installation
+Add Terminal.app and/or your Python installation.
 
-#### 2. Automation Access (Required)  
-For AppleScript control of DEVONthink:
+### Automation
+
+DEVONthink integration uses AppleScript, which requires explicit automation permission.
+
+System Settings > Privacy & Security > Automation
+
+Allow Terminal (or Python) to control DEVONthink 3.
+
+## Installation
 
 ```bash
-System Preferences → Security & Privacy → Privacy → Automation
-```
-Allow Terminal (or Python) to control DEVONthink
-
-## Installation Methods
-
-### Method 1: Git Clone (Recommended)
-```bash
-# Create project directory
-cd /Users/$(whoami)
 git clone <repository-url> DEVONzot
 cd DEVONzot
-
-# Set up Python environment
 python3 -m venv venv
 source venv/bin/activate
-
-# Install (no external dependencies needed)
-pip install -r requirements.txt
+pip install -r src/requirements.txt
 ```
 
-### Method 2: Download and Setup
+### Optional: Playwright (Tier 2 Extraction)
+
+Playwright is disabled by default. Enable it only if you need headless browser extraction for JavaScript-heavy pages.
+
 ```bash
-# Download project files to /Users/$(whoami)/DEVONzot
-# Then:
-cd /Users/$(whoami)/DEVONzot
-python3 -m venv venv
-source venv/bin/activate
+pip install playwright>=1.40.0
+playwright install chromium
 ```
 
-## Verification Steps
+Set `ENABLE_PLAYWRIGHT=true` in `.env` to activate.
 
-### 1. Test Python Environment
+## Configuration
+
 ```bash
-cd /Users/$(whoami)/DEVONzot
-source venv/bin/activate
-python3 --version  # Should show 3.8+
+cp config/.env.example .env
 ```
 
-### 2. Test DEVONthink Connection
+Open `.env` and set the two required values:
+
+```
+ZOTERO_API_KEY=your-api-key-here
+ZOTERO_USER_ID=your-user-id-here
+```
+
+All other settings have sensible defaults and do not need to be changed for a standard installation. See `docs/README.md` for a full reference of every environment variable.
+
+To find your Zotero credentials: Zotero > Settings > Feeds/API > Create new private key.
+
+## Verification
+
+**1. Test Python**
+
 ```bash
-# This should succeed without errors:
+python3 --version
+```
+
+Should show 3.8 or later.
+
+**2. Test DEVONthink**
+
+```bash
 osascript -e 'tell application "DEVONthink 3" to get version'
 ```
 
-### 3. Test Zotero Database Access
+Should return a version string. If it fails, check that DEVONthink 3 is installed, licensed, and that Automation permission has been granted.
+
+**3. Test the service (dry run)**
+
 ```bash
-# Run database exploration (safe read-only test):
-python3 explore_zotero_db.py
+source venv/bin/activate
+python3 src/devonzot_service.py --dry-run
 ```
 
-### 4. Initial Dry Run
-```bash
-# Full system test without making changes:
-python3 devonzot_service.py --dry-run
-```
-
-## Troubleshooting Installation
-
-### Python Path Issues
-```bash
-# If python3 not found, install Xcode Command Line Tools:
-xcode-select --install
-
-# Or use Homebrew:
-brew install python3
-```
-
-### Permission Errors
-```bash
-# If database access fails:
-# 1. Ensure Zotero is closed
-# 2. Check Full Disk Access permissions
-# 3. Try running with sudo (not recommended for production)
-```
-
-### DEVONthink Connection Issues
-```bash
-# Test AppleScript access:
-osascript -e 'tell application "DEVONthink 3" to activate'
-
-# If this fails, check:
-# 1. DEVONthink 3 is installed and licensed
-# 2. Automation permissions are granted
-# 3. DEVONthink is not blocking AppleScript
-```
-
-## First Run Configuration
-
-### 1. Backup Your Data
-```bash
-# Backup Zotero library (File → Export Library)
-# Backup DEVONthink databases (File → Export → Files and Folders)
-```
-
-### 2. Close Applications
-```bash
-# Ensure clean database access:
-pkill -f Zotero
-pkill -f "DEVONthink"
-# Then reopen only DEVONthink
-```
-
-### 3. Initial Analysis
-```bash
-# Run comprehensive analysis:
-python3 devonzot_service.py --dry-run
-
-# Review output for:
-# - Number of attachments to migrate  
-# - Potential filename conflicts
-# - Problematic items requiring attention
-```
-
-### 4. Resolve Conflicts (If Any)
-```bash
-# Address filename collisions in Zotero:
-# 1. Find duplicate items
-# 2. Merge or rename as needed
-# 3. Re-run dry-run to verify resolution
-```
-
-## Production Deployment
-
-### Manual Operation
-```bash
-# Single migration run:
-python3 devonzot_service.py --once
-
-# Continuous service:
-python3 devonzot_service.py
-```
-
-### Automated Operation (Cron)
-```bash
-# Edit crontab:
-crontab -e
-
-# Add hourly sync (adjust path as needed):
-0 * * * * cd /Users/$(whoami)/DEVONzot && source venv/bin/activate && python3 devonzot_service.py --once >/dev/null 2>&1
-
-# Or daily sync at 2 AM:
-0 2 * * * cd /Users/$(whoami)/DEVONzot && source venv/bin/activate && python3 devonzot_service.py --once >/dev/null 2>&1
-```
-
-### Service Monitoring
-```bash
-# Check service logs:
-tail -f service.log
-
-# Check service state:
-python3 sync_status.py
-
-# Monitor system resources:
-ps aux | grep devonzot
-```
+Should print a summary of planned actions without making any changes. DEVONthink must be open for this to succeed.
 
 ## Directory Structure
 
-After installation, your directory should look like:
-
 ```
 DEVONzot/
-├── devonzot_service.py      # Main service (production ready)
-├── README.md                # Complete documentation
-├── CHANGELOG.md             # Version history
-├── LICENSE                  # MIT license
-├── requirements.txt         # Python dependencies (minimal)
-├── venv/                    # Python virtual environment
-├── service.log             # Runtime logs (created on first run)
-├── service_state.json      # State tracking (created on first run)
-└── [test scripts]/         # Development and testing files
+├── src/                         # Source code
+│   ├── devonzot_service.py      # Main async service
+│   ├── zotero_api_client.py     # Zotero Web API client
+│   ├── pipeline_add_url.py      # URL pipeline
+│   ├── article_extraction.py
+│   ├── rss_extractor.py
+│   ├── playwright_extractor.py
+│   ├── wayback_extractor.py
+│   ├── combine_article_extracts.py
+│   ├── zotero_stream.py
+│   ├── cleanup_service.py
+│   ├── exceptions.py
+│   ├── diagnose_attachments.py
+│   ├── create_zotero_item_from_url.py
+│   ├── devonzot_add_new.py
+│   └── requirements.txt
+├── tests/                       # Test suite
+├── config/
+│   └── .env.example             # Environment variable template
+├── docs/                        # Documentation
+├── .env                         # Your credentials (gitignored)
+├── pytest.ini                   # Test configuration
+├── service_state.json           # Runtime state (created on first run)
+├── service.log                  # Runtime logs
+└── venv/                        # Python virtual environment
 ```
 
-## Environment Variables
+## Background Service
 
-Optional customization:
-
-```bash
-# Performance tuning:
-export DEVONZOT_WAIT_TIME=3        # Seconds between operations
-export DEVONZOT_BATCH_SIZE=50      # Items per batch
-
-# Operation modes:
-export DEVONZOT_DRY_RUN=true       # Force dry-run mode
-export DEVONZOT_LOG_LEVEL=DEBUG    # Verbose logging
-
-# Add to your shell profile (~/.zshrc) for persistence
-```
+For unattended operation via macOS launchd, see `docs/INSTALL_LAUNCHD.md`.
 
 ## Uninstallation
 
-If you need to remove DEVONzot:
-
 ```bash
-# Stop any running services:
-pkill -f devonzot_service.py
+# Stop any running service instance
+python3 src/devonzot_service.py --stop
 
-# Remove cron jobs:
-crontab -e  # Delete any DEVONzot entries
+# Remove launchd job if installed (see INSTALL_LAUNCHD.md for details)
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.devonzot.addnew.plist
+rm ~/Library/LaunchAgents/com.devonzot.addnew.plist
 
-# Remove project directory:
-rm -rf /Users/$(whoami)/DEVONzot
-
-# Note: Your Zotero and DEVONthink data is never modified
-# Any created UUID links will continue to work
+# Remove the project directory
+rm -rf /path/to/DEVONzot
 ```
 
-## Support Resources
-
-- **Documentation**: See README.md for complete usage guide
-- **Logs**: Check `service.log` for detailed operation history  
-- **State**: Review `service_state.json` for progress tracking
-- **Testing**: Always use `--dry-run` before major operations
+UUID links already written into Zotero (`x-devonthink-item://...`) continue to work after DEVONzot is removed, as long as DEVONthink and its databases remain intact.
