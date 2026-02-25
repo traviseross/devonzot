@@ -1,8 +1,3 @@
-from dotenv import load_dotenv
-import os
-
-# Load environment variables from .env file (absolute path)
-load_dotenv('/Users/travisross/DEVONzot/.env')
 #!/usr/bin/env python3
 """
 DEVONzot API Service v2.0 - Add New URL Attachments
@@ -14,18 +9,17 @@ import asyncio
 import json
 import logging
 import os
-import time
-import requests
+import re
+import subprocess
 from typing import List, Dict, Optional, Any
 from dataclasses import dataclass
 from pathlib import Path
-from dotenv import load_dotenv
-import subprocess
 from datetime import datetime
-import re
+from dotenv import load_dotenv
+from zotero_api_client import ZoteroAPIClient
 
 # Configuration
-load_dotenv(Path(__file__).resolve().parent / '.env')
+load_dotenv(Path(__file__).resolve().parent.parent / '.env')
 
 ZOTERO_API_KEY = os.environ["ZOTERO_API_KEY"]
 ZOTERO_USER_ID = os.environ["ZOTERO_USER_ID"]
@@ -59,132 +53,6 @@ class AttachmentPair:
     confirmed: bool = False
     old_deleted: bool = False
 
-class ZoteroAPIClient:
-    """Enhanced Zotero API client for add-new-attachment workflow"""
-    
-    def __init__(self, api_key: str, user_id: str):
-        self.api_key = api_key
-        self.user_id = user_id
-        self.session = requests.Session()
-        self.session.headers.update({
-            'Zotero-API-Version': API_VERSION,
-            'Authorization': f'Bearer {api_key}',
-            'User-Agent': 'DEVONzot-AddNew-Service/2.0'
-        })
-        self.attachment_pairs = []
-    
-    def _rate_limit(self, seconds=None):
-        """Respect API rate limits"""
-        time.sleep(seconds if seconds is not None else RATE_LIMIT_DELAY)
-    
-    def get_attachment_batch(self, start: int = 0, limit: int = 50) -> List[Dict]:
-        """Get batch of file attachments needing UUID conversion"""
-        self._rate_limit()
-        
-        params = {
-            'itemType': 'attachment',
-            'limit': limit,
-            'start': start,
-            'format': 'json'
-        }
-        
-        url = f'{ZOTERO_API_BASE}/users/{self.user_id}/items'
-        response = self.session.get(url, params=params)
-        
-        if response.status_code != 200:
-            logger.error(f"API error: {response.status_code} - {response.text}")
-            return []
-            
-        return response.json()
-    
-    def get_item(self, item_key: str) -> Optional[Dict]:
-        """Get specific item by key"""
-        self._rate_limit()
-        
-        url = f'{ZOTERO_API_BASE}/users/{self.user_id}/items/{item_key}'
-        response = self.session.get(url)
-        
-        return response.json() if response.status_code == 200 else None
-    
-    def create_url_attachments(self, attachments: list) -> list:
-        """Batch create new URL attachments. Each item in attachments is a dict with parent_key, title, url."""
-        batch = [
-            {
-                "itemType": "attachment",
-                "parentItem": att["parent_key"],
-                "linkMode": "linked_url",
-                "title": att["title"],
-                "url": att["url"],
-                "contentType": "application/pdf"
-            }
-            for att in attachments
-        ]
-        url_endpoint = f'{ZOTERO_API_BASE}/users/{self.user_id}/items'
-        response = self._safe_request('POST', url_endpoint, json=batch)
-        results = []
-        if response and response.status_code == 200:
-            created_items = response.json()
-            for idx, att in enumerate(attachments):
-                key = None
-                if created_items.get('successful') and str(idx) in created_items['successful']:
-                    key = created_items['successful'][str(idx)]['key']
-                results.append({"input": att, "new_key": key})
-        else:
-            logger.error(f"Batch create failed: {response.status_code if response else 'No response'}")
-            for att in attachments:
-                results.append({"input": att, "new_key": None})
-        return results
-
-    def _safe_request(self, method: str, url: str, **kwargs):
-        """API request with rate limiting, backoff, and retry-after handling"""
-        max_retries = 5
-        delay = RATE_LIMIT_DELAY
-        for attempt in range(max_retries):
-            response = None
-            try:
-                response = self.session.request(method, url, timeout=30, **kwargs)
-            except Exception as e:
-                logger.error(f"API request failed: {e}")
-                time.sleep(delay)
-                continue
-
-            # Handle Backoff header
-            backoff = response.headers.get("Backoff")
-            if backoff:
-                logger.warning(f"Received Backoff header: waiting {backoff} seconds")
-                time.sleep(float(backoff))
-
-            # Handle Retry-After header (429/503 or any response)
-            if response.status_code in (429, 503):
-                retry_after = response.headers.get("Retry-After")
-                if retry_after:
-                    logger.warning(f"Rate limited ({response.status_code}): waiting {retry_after} seconds")
-                    time.sleep(float(retry_after))
-                else:
-                    logger.warning(f"Rate limited ({response.status_code}): exponential backoff {delay} seconds")
-                    time.sleep(delay)
-                    delay = min(delay * 2, 60)
-                continue
-
-            # If not rate limited, return response
-            return response
-        logger.error("Max retries reached for Zotero API request.")
-        return None
-    
-    def delete_attachment(self, attachment_key: str, version: int) -> bool:
-        """Delete old file attachment"""
-        self._rate_limit()
-        
-        url = f'{ZOTERO_API_BASE}/users/{self.user_id}/items/{attachment_key}'
-        headers = {'If-Unmodified-Since-Version': str(version)}
-        response = self.session.delete(url, headers=headers)
-        
-        if response.status_code == 204:
-            logger.info(f"🗑️ Deleted old file attachment: {attachment_key}")
-            return True
-        else:
-            logger.error(f"Failed to delete attachment {attachment_key}: {response.status_code}")
-            return False
 
 class DEVONthinkAPIInterface:
     """DEVONthink interface with smart search"""
@@ -261,7 +129,13 @@ class DEVONzotAddNewService:
     """Service that adds new UUID attachments instead of modifying existing ones"""
     
     def __init__(self):
-        self.zotero = ZoteroAPIClient(ZOTERO_API_KEY, ZOTERO_USER_ID)
+        self.zotero = ZoteroAPIClient(
+            api_key=ZOTERO_API_KEY,
+            user_id=ZOTERO_USER_ID,
+            api_base=ZOTERO_API_BASE,
+            api_version=API_VERSION,
+            rate_limit_delay=RATE_LIMIT_DELAY,
+        )
         self.devonthink = DEVONthinkAPIInterface()
         self.callback_file = Path(os.environ.get("ATTACHMENT_PAIRS_PATH", "attachment_pairs.json"))
         self.load_attachment_pairs()
@@ -355,7 +229,7 @@ class DEVONzotAddNewService:
                 for res in batch_results:
                     candidate, uuid = candidate_map.get(res['input']['title'], (None, None))
                     if res['new_key'] and candidate:
-                        parent_item = self.zotero.get_item(candidate['parent_key'])
+                        parent_item = self.zotero.get_item_raw(candidate['parent_key'])
                         parent_title = parent_item.get('data', {}).get('title', 'Unknown') if parent_item else 'Unknown'
                         pair = AttachmentPair(
                             old_key=candidate['key'],
@@ -379,7 +253,7 @@ class DEVONzotAddNewService:
                             'timestamp': pair.timestamp
                         })
                         # Delete previous linked file attachment immediately
-                        old_item = self.zotero.get_item(candidate['key'])
+                        old_item = self.zotero.get_item_raw(candidate['key'])
                         if old_item:
                             version = old_item.get('data', {}).get('version', 0)
                             if self.zotero.delete_attachment(candidate['key'], version):
@@ -443,7 +317,7 @@ class DEVONzotAddNewService:
         for pair in unconfirmed:
             try:
                 # Get current version of old attachment for deletion
-                old_item = self.zotero.get_item(pair.old_key)
+                old_item = self.zotero.get_item_raw(pair.old_key)
                 if old_item and not pair.old_deleted:
                     version = old_item.get('data', {}).get('version', 0)
                     
@@ -476,7 +350,7 @@ class DEVONzotAddNewService:
             if pair.new_key and not pair.confirmed:
                 try:
                     # Get current version of new UUID attachment
-                    new_item = self.zotero.get_item(pair.new_key)
+                    new_item = self.zotero.get_item_raw(pair.new_key)
                     if new_item:
                         version = new_item.get('data', {}).get('version', 0)
                         

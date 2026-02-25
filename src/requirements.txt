@@ -1,4 +1,22 @@
 psutil>=7.2.0
 requests>=2.32.3
 python-dotenv>=1.0.1
+websockets>=13.0
+newspaper3k
+readability-lxml
+html2text
+extruct
+trafilatura
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+feedparser>=6.0.11
+
+# Optional: Install for JavaScript-heavy sites (Tier 2 fallback)
+# Uncomment the line below and run: playwright install chromium
+# playwright>=1.40.0
+
+# Testing dependencies
 pytest>=8.0.0
+pytest-cov>=6.0.0
+pytest-mock>=3.14.0
+pytest-asyncio>=0.23.0

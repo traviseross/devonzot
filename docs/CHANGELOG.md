@@ -4,6 +4,10 @@ All notable changes to DEVONzot will be documented in this file.
 
 ## [Unreleased]
 
+---
+
+## [2.0.0] - 2026-02-24
+
 ### Added
 - ZoteroAPIClient: centralized Web API v3 client (`src/zotero_api_client.py`)
 - WebSocket streaming via Zotero Streaming API (`src/zotero_stream.py`) with configurable polling fallback
@@ -16,6 +20,7 @@ All notable changes to DEVONzot will be documented in this file.
 - Test suite: 11 test files in `tests/` using pytest, pytest-asyncio, and pytest-mock
 - `src/` package layout replacing root-level scripts
 - `linkMode=0` (imported_file) and `linkMode=1` (imported_url) support alongside existing `linkMode=2`
+- DEVONthink callback URL attachments now use the document filename as link text (was generic "DEVONthink Link"); existing links are retroactively renamed on next run
 
 ### Changed
 - Primary Zotero integration: Web API via `ZoteroAPIClient` (was direct SQLite for writes)
