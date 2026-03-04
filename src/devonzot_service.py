@@ -1219,20 +1219,26 @@ class DEVONzotService:
         return results
 
     def retry_pending_deletes(self, dry_run=False, interactive=False) -> Dict[str, int]:
-        """Retry deletion of Zotero attachment items that failed in previous cycles."""
+        """Retry deletion of Zotero attachment items that failed in previous cycles.
+
+        Uses batch API calls (get_items_by_keys, delete_items_batch) to process
+        the full queue in O(ceil(N/50)) round-trips instead of O(N).
+        Interactive mode falls back to per-item prompts.
+        """
         results = {'retried': 0, 'deleted': 0, 'failed': 0, 'would_delete': 0, 'skipped': 0}
 
         if not self.state.pending_deletes:
             return results
 
-        logger.info(f"Retrying {len(self.state.pending_deletes)} pending attachment deletes...")
+        n = len(self.state.pending_deletes)
+        logger.info(f"Retrying {n} pending attachment deletes...")
 
-        remaining = []
-        for pending in self.state.pending_deletes:
-            results['retried'] += 1
-            key = pending['key']
-
-            if interactive:
+        # Interactive mode: per-item prompts, sequential processing
+        if interactive:
+            remaining = []
+            for pending in self.state.pending_deletes:
+                results['retried'] += 1
+                key = pending['key']
                 decision = self._interactive_prompt(
                     phase="Retry Queue - Delete pending attachment",
                     record_details={
@@ -1251,34 +1257,73 @@ class DEVONzotService:
                     if decision == 's':
                         break
                     continue
-
-            if dry_run:
-                logger.info(f"[DRY RUN] Would retry delete of {key}")
-                results['would_delete'] += 1
-                continue
-
-            att_item = self.zotero_api.get_item_raw(key)
-            if att_item is None:
-                logger.info(f"Pending delete {key} no longer exists — removing from queue")
-                results['deleted'] += 1
-                continue
-
-            version = att_item.get('data', {}).get('version', 0)
-            if self.zotero_api.delete_attachment(key, version):
-                results['deleted'] += 1
-                logger.info(f"Successfully deleted pending item: {key}")
-            else:
-                results['failed'] += 1
-                remaining.append({'key': key, 'version': version})
-
-        if not dry_run:
-            self.state.pending_deletes = remaining
-            self._save_state()
-
-        if dry_run:
-            logger.info(f"[DRY RUN] Pending deletes: would retry {results['would_delete']}")
-        else:
+                if dry_run:
+                    results['would_delete'] += 1
+                    continue
+                att_item = self.zotero_api.get_item_raw(key)
+                if att_item is None:
+                    results['deleted'] += 1
+                    continue
+                version = att_item.get('data', {}).get('version', 0)
+                if self.zotero_api.delete_attachment(key, version):
+                    results['deleted'] += 1
+                else:
+                    results['failed'] += 1
+                    remaining.append({'key': key, 'version': version})
+            if not dry_run:
+                self.state.pending_deletes = remaining
+                self._save_state()
             logger.info(f"Pending deletes: {results['deleted']} deleted, {results['failed']} still pending")
+            return results
+
+        # Dry-run mode: count without API calls
+        if dry_run:
+            results['retried'] = n
+            results['would_delete'] = n
+            logger.info(f"[DRY RUN] Pending deletes: would retry {n}")
+            return results
+
+        # Normal batch execution
+        results['retried'] = n
+        all_keys = [p['key'] for p in self.state.pending_deletes]
+        key_to_pending = {p['key']: p for p in self.state.pending_deletes}
+
+        # Stage 1: Batch-check existence (ceil(N/50) GET requests)
+        existing_items = self.zotero_api.get_items_by_keys(all_keys)
+        existing_key_set = {item['data']['key'] for item in existing_items}
+
+        already_gone = [k for k in all_keys if k not in existing_key_set]
+        still_exist = [k for k in all_keys if k in existing_key_set]
+
+        if already_gone:
+            logger.info(f"Pending deletes: {len(already_gone)} item(s) already gone from Zotero — removed from queue")
+        results['deleted'] += len(already_gone)
+
+        # Stage 2: Batch-delete remaining items (ceil(M/50) DELETE requests)
+        remaining = []
+        if still_exist:
+            library_version = self.zotero_api.last_library_version or 0
+            if library_version == 0:
+                self.zotero_api._get_all_attachments_cached()
+                library_version = self.zotero_api.last_library_version or 0
+
+            delete_results = self.zotero_api.delete_items_batch(still_exist, library_version)
+            results['deleted'] += delete_results['deleted']
+
+            if delete_results['failed']:
+                results['failed'] += len(delete_results['failed'])
+                for failed_key in delete_results['failed']:
+                    orig = key_to_pending.get(failed_key, {})
+                    remaining.append({'key': failed_key, 'version': orig.get('version', 0)})
+                if delete_results.get('version_conflict'):
+                    logger.warning(
+                        f"Version conflict during batch delete — "
+                        f"{len(delete_results['failed'])} item(s) kept in pending queue for retry"
+                    )
+
+        self.state.pending_deletes = remaining
+        self._save_state()
+        logger.info(f"Pending deletes: {results['deleted']} deleted, {results['failed']} still pending")
         return results
 
     def migrate_stored_attachments(self, dry_run=False, interactive=False) -> Dict[str, int]:

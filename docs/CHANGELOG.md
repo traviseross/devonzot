@@ -4,6 +4,9 @@ All notable changes to DEVONzot will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- `retry_pending_deletes` now uses batch API calls (`get_items_by_keys`, `delete_items_batch`) instead of per-item sequential requests, reducing 414 stale pending deletes from ~15 minutes to ~18 seconds
+
 ---
 
 ## [2.0.0] - 2026-02-24

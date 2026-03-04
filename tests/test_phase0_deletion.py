@@ -65,7 +65,8 @@ def mock_zotero_client():
     client.delete_attachment = Mock(return_value=True)
     client.create_url_attachments = Mock(return_value=[])
     client._get_all_attachments_cached = Mock(return_value=[])
-    
+    client.get_items_by_keys = Mock(return_value=[])
+
     return client
 
 
@@ -661,89 +662,128 @@ class TestDeleteImportedUrlAttachments:
 
 
 class TestRetryPendingDeletes:
-    """Test retry_pending_deletes() method."""
-    
+    """Test retry_pending_deletes() method (batch path)."""
+
     def test_successfully_retries_and_clears_pending_items(self, service_with_mocks, mock_zotero_client):
-        """Successfully retries and clears pending items from list."""
-        # Set up pending deletes in service state
+        """Both items still exist in Zotero — batch delete succeeds."""
         service_with_mocks.state.pending_deletes = [
             {'key': 'KEY_001', 'version': 5},
             {'key': 'KEY_002', 'version': 3},
         ]
-        
-        # Mock the API to return that items exist
-        mock_zotero_client.get_item_raw = Mock(return_value={'data': {'version': 5}})
-        mock_zotero_client.delete_attachment = Mock(return_value=True)
-        
+        mock_zotero_client.get_items_by_keys = Mock(return_value=[
+            {'data': {'key': 'KEY_001', 'version': 5}},
+            {'data': {'key': 'KEY_002', 'version': 3}},
+        ])
+        mock_zotero_client.delete_items_batch = Mock(
+            return_value={'deleted': 2, 'failed': [], 'version_conflict': False}
+        )
+
         result = service_with_mocks.retry_pending_deletes(dry_run=False)
-        
+
         assert result['retried'] == 2
         assert result['deleted'] == 2
         assert result['failed'] == 0
-        # Pending deletes should be cleared
         assert service_with_mocks.state.pending_deletes == []
-    
+        mock_zotero_client.get_item_raw.assert_not_called()
+        mock_zotero_client.delete_attachment.assert_not_called()
+
     def test_handles_already_deleted_items(self, service_with_mocks, mock_zotero_client):
-        """Handles items that no longer exist (already deleted)."""
+        """One item gone, one still exists — both counted as deleted."""
         service_with_mocks.state.pending_deletes = [
             {'key': 'KEY_001', 'version': 5},
             {'key': 'KEY_002', 'version': 3},
         ]
-        
-        # First item returns None (already deleted), second returns data
-        mock_zotero_client.get_item_raw = Mock(side_effect=[None, {'data': {'version': 3}}])
-        mock_zotero_client.delete_attachment = Mock(return_value=True)
-        
+        mock_zotero_client.get_items_by_keys = Mock(return_value=[
+            {'data': {'key': 'KEY_002', 'version': 3}},
+        ])
+        mock_zotero_client.delete_items_batch = Mock(
+            return_value={'deleted': 1, 'failed': [], 'version_conflict': False}
+        )
+
         result = service_with_mocks.retry_pending_deletes(dry_run=False)
-        
+
         assert result['retried'] == 2
-        assert result['deleted'] == 2  # Both counted as deleted
+        assert result['deleted'] == 2  # 1 already gone + 1 batch deleted
         assert result['failed'] == 0
-    
+
     def test_keeps_failed_items_in_pending_list(self, service_with_mocks, mock_zotero_client):
-        """Keeps failed items in pending list for retry later."""
+        """Batch delete fails for one item — kept in pending list."""
         service_with_mocks.state.pending_deletes = [
             {'key': 'KEY_001', 'version': 5},
             {'key': 'KEY_002', 'version': 3},
         ]
-        
-        mock_zotero_client.get_item_raw = Mock(return_value={'data': {'version': 5}})
-        # First delete succeeds, second fails
-        mock_zotero_client.delete_attachment = Mock(side_effect=[True, False])
-        
+        mock_zotero_client.get_items_by_keys = Mock(return_value=[
+            {'data': {'key': 'KEY_001', 'version': 5}},
+            {'data': {'key': 'KEY_002', 'version': 3}},
+        ])
+        mock_zotero_client.delete_items_batch = Mock(
+            return_value={'deleted': 1, 'failed': ['KEY_002'], 'version_conflict': False}
+        )
+
         result = service_with_mocks.retry_pending_deletes(dry_run=False)
-        
+
         assert result['retried'] == 2
         assert result['deleted'] == 1
         assert result['failed'] == 1
-        # Failed item should remain in pending list
         assert len(service_with_mocks.state.pending_deletes) == 1
         assert service_with_mocks.state.pending_deletes[0]['key'] == 'KEY_002'
-    
+
     def test_dry_run_mode(self, service_with_mocks, mock_zotero_client):
-        """Operates in dry run mode without actual deletion."""
+        """Dry run counts without API calls."""
         service_with_mocks.state.pending_deletes = [
             {'key': 'KEY_001', 'version': 5},
         ]
-        
+
         result = service_with_mocks.retry_pending_deletes(dry_run=True)
 
         assert result['retried'] == 1
         assert result['deleted'] == 0
         assert result['would_delete'] == 1
-        # Pending list should NOT be modified in dry run
         assert len(service_with_mocks.state.pending_deletes) == 1
         mock_zotero_client.get_item_raw.assert_not_called()
-    
+        mock_zotero_client.get_items_by_keys.assert_not_called()
+
     def test_returns_empty_result_when_no_pending_deletes(self, service_with_mocks, mock_zotero_client):
         """Returns empty result when no pending deletes exist."""
         service_with_mocks.state.pending_deletes = []
-        
+
         result = service_with_mocks.retry_pending_deletes(dry_run=False)
-        
+
         assert result['retried'] == 0
         assert result['deleted'] == 0
         assert result['failed'] == 0
+
+    def test_all_already_gone_skips_batch_delete(self, service_with_mocks, mock_zotero_client):
+        """All items gone from Zotero — delete_items_batch never called."""
+        service_with_mocks.state.pending_deletes = [
+            {'key': 'KEY_001', 'version': 5},
+            {'key': 'KEY_002', 'version': 3},
+        ]
+        mock_zotero_client.get_items_by_keys = Mock(return_value=[])
+
+        result = service_with_mocks.retry_pending_deletes(dry_run=False)
+
+        assert result['deleted'] == 2
+        assert result['failed'] == 0
+        assert service_with_mocks.state.pending_deletes == []
+        mock_zotero_client.delete_items_batch.assert_not_called()
+
+    def test_version_conflict_keeps_failed_in_queue(self, service_with_mocks, mock_zotero_client):
+        """Version conflict on batch delete keeps items in pending queue."""
+        service_with_mocks.state.pending_deletes = [
+            {'key': 'KEY_001', 'version': 5},
+        ]
+        mock_zotero_client.get_items_by_keys = Mock(return_value=[
+            {'data': {'key': 'KEY_001', 'version': 5}},
+        ])
+        mock_zotero_client.delete_items_batch = Mock(
+            return_value={'deleted': 0, 'failed': ['KEY_001'], 'version_conflict': True}
+        )
+
+        result = service_with_mocks.retry_pending_deletes(dry_run=False)
+
+        assert result['failed'] == 1
+        assert len(service_with_mocks.state.pending_deletes) == 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
