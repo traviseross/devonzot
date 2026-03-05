@@ -2312,8 +2312,46 @@ class DEVONzotService:
                     else:
                         logger.info(f"[DRY RUN] Would delete imported_url: {attachment.key}")
                 elif link_mode == 'imported_file':
-                    # Phase 1A: leave for full cycle
-                    skipped_count += 1
+                    attachment = self.zotero_api._api_item_to_zotero_attachment(api_item)
+                    try:
+                        file_path = self._resolve_storage_path(attachment)
+                        if not file_path or not attachment.parent_key:
+                            skipped_count += 1
+                            continue
+                        parent = self.zotero_api.get_item(attachment.parent_key)
+                        if not parent:
+                            skipped_count += 1
+                            continue
+                        filename = FilenameGenerator.generate_filename(parent)
+                        zotero_filename = self._get_zotero_filename(attachment)
+                        dt_uuid = self._find_or_adopt_in_devonthink(filename, zotero_filename, dry_run)
+                        if not dt_uuid and file_path.exists():
+                            if self.devonthink.copy_file_to_inbox(str(file_path), filename, dry_run):
+                                dt_uuid = self.devonthink.find_item_by_filename_after_wait(filename, dry_run)
+                        if dt_uuid:
+                            if self._create_devonthink_child_link(attachment.parent_key, dt_uuid, title=filename, dry_run=dry_run):
+                                self.devonthink.update_item_metadata(dt_uuid, parent, dry_run)
+                                if not dry_run:
+                                    file_path.unlink(missing_ok=True)
+                                    if not any(file_path.parent.iterdir()):
+                                        file_path.parent.rmdir()
+                                    att_raw = self.zotero_api.get_item_raw(attachment.key)
+                                    if att_raw:
+                                        v = att_raw['data'].get('version', 0)
+                                        self.zotero_api.delete_attachment(attachment.key, v)
+                                    if attachment.parent_key not in self.state.processed_items:
+                                        self.state.processed_items.append(attachment.parent_key)
+                                        self._save_state()
+                                processed_count += 1
+                                logger.info(f"Migrated stored attachment {attachment.key} → {dt_uuid}")
+                            else:
+                                error_count += 1
+                        else:
+                            error_count += 1
+                            logger.error(f"Failed to find DEVONthink UUID for stored attachment {attachment.key}")
+                    except Exception as e:
+                        logger.error(f"Failed to process stored attachment {attachment.key}: {e}")
+                        error_count += 1
 
             # Step 4: Check for deletions
             deleted = self.zotero_api.get_deleted_since(since_version)
