@@ -398,14 +398,29 @@ class DEVONthinkInterface:
         return filename_to_uuid
     
     def _search_database_for_filename(self, filename: str, database_name: str) -> Optional[str]:
-        """Search specific database for filename"""
-        safe_filename = filename.replace('"', '\\"').replace('\\', '\\\\')
+        """Search specific database for filename using keyword matching.
+
+        Uses name: prefix on each keyword to avoid false positives from
+        content matches. Non-ASCII characters are stripped since DEVONthink
+        may store them differently than Python encodes them.
+        """
+        # Extract ASCII-only alphanumeric words for keyword matching
+        # Replace non-ASCII and punctuation with spaces, then split into words
+        ascii_name = ''.join(c if ord(c) < 128 else ' ' for c in filename)
+        ascii_name = ''.join(c if c.isalnum() or c == ' ' else ' ' for c in ascii_name)
+        words = [w for w in ascii_name.split() if len(w) >= 3 and w.lower() not in ('the', 'and', 'for') and not w.isdigit()]
+        if not words:
+            return None
+        # Use up to 6 significant words to balance precision vs brittleness
+        search_words = words[:6]
+        query = ' '.join(f'name:{w}' for w in search_words)
+        query = query.replace('"', '\\"').replace('\\', '\\\\')
 
         script = f'''
         tell application "DEVONthink 3"
             try
                 tell database "{database_name}"
-                    set searchResults to search "name:\\"{safe_filename}\\""
+                    set searchResults to search "{query}"
 
                     if (count of searchResults) > 0 then
                         set theRecord to item 1 of searchResults
