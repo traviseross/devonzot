@@ -348,7 +348,7 @@ class DEVONthinkInterface:
         return None
 
     def find_item_by_filename_after_wait(self, filename: str, dry_run=False) -> Optional[str]:
-        """Synchronous version of find_item_by_filename_after_wait"""
+        """Search DEVONthink for a file after waiting for indexing."""
         if dry_run:
             logger.info(f"[DRY RUN] Would search for filename '{filename}' after {DEVONTHINK_WAIT_TIME}s wait")
             return "dry-run-uuid"
@@ -357,17 +357,20 @@ class DEVONthinkInterface:
             logger.error("DEVONthink is not running")
             return None
 
-        logger.debug(f"Waiting {DEVONTHINK_WAIT_TIME} seconds for DEVONthink auto-sort...")
-        time.sleep(DEVONTHINK_WAIT_TIME)
-
         databases = ["Global Inbox", "Professional", "Articles", "Books", "Research"]
-        for db_name in databases:
-            uuid = self._search_database_for_filename(filename, db_name)
-            if uuid:
-                logger.info(f"Found item in {db_name}: {uuid}")
-                return uuid
+        max_attempts = 3
 
-        logger.debug(f"Item not found in any database: {filename}")
+        for attempt in range(max_attempts):
+            time.sleep(DEVONTHINK_WAIT_TIME)
+            for db_name in databases:
+                uuid = self._search_database_for_filename(filename, db_name)
+                if uuid:
+                    logger.info(f"Found item in {db_name}: {uuid}")
+                    return uuid
+            if attempt < max_attempts - 1:
+                logger.debug(f"Item not found after attempt {attempt + 1}, retrying...")
+
+        logger.warning(f"Item not found in any database after {max_attempts} attempts: {filename}")
         return None
 
     async def batch_search_items(self, filenames: List[str], dry_run=False) -> Dict[str, Optional[str]]:
