@@ -408,11 +408,18 @@ class DEVONthinkInterface:
         # Replace non-ASCII and punctuation with spaces, then split into words
         ascii_name = ''.join(c if ord(c) < 128 else ' ' for c in filename)
         ascii_name = ''.join(c if c.isalnum() or c == ' ' else ' ' for c in ascii_name)
-        words = [w for w in ascii_name.split() if len(w) >= 3 and w.lower() not in ('the', 'and', 'for') and not w.isdigit()]
+        stop_words = {'the', 'and', 'for', 'not', 'but', 'with', 'from', 'that', 'this',
+                      'they', 'what', 'who', 'how', 'why', 'two', 'one', 'its', 'has',
+                      'had', 'was', 'are', 'were', 'been', 'will', 'can', 'may', 'did',
+                      'does', 'have', 'after', 'before', 'about', 'into', 'over', 'also'}
+        words = [w for w in ascii_name.split() if len(w) >= 4 and w.lower() not in stop_words and not w.isdigit()]
+        if not words:
+            # Fall back to shorter words if nothing qualifies
+            words = [w for w in ascii_name.split() if len(w) >= 3 and not w.isdigit()]
         if not words:
             return None
-        # Use up to 6 significant words to balance precision vs brittleness
-        search_words = words[:6]
+        # Use up to 4 significant words — more keywords increases false negatives in DEVONthink
+        search_words = words[:4]
         query = ' '.join(f'name:{w}' for w in search_words)
         query = query.replace('"', '\\"').replace('\\', '\\\\')
 
