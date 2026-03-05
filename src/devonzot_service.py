@@ -1353,10 +1353,15 @@ class DEVONzotService:
 
         for attachment in attachments:
             try:
-                # Skip if already processed
+                # Skip if already processed — but verify the file is actually gone
                 if attachment.parent_key and attachment.parent_key in self.state.processed_items:
-                    results['skipped_already_processed'] += 1
-                    continue
+                    storage_file = self._resolve_storage_path(attachment)
+                    if storage_file and storage_file.exists():
+                        logger.info(f"Re-processing {attachment.key}: parent {attachment.parent_key} "
+                                     f"marked processed but storage file still exists at {storage_file}")
+                    else:
+                        results['skipped_already_processed'] += 1
+                        continue
 
                 # Resolve file path
                 file_path = self._resolve_storage_path(attachment)
@@ -1511,12 +1516,6 @@ class DEVONzotService:
                             results['success'] += 1
                             logger.info(f"✅ Migrated attachment {attachment.key} → {dt_uuid}")
 
-                            # Track processed item and save immediately
-                            if not dry_run:
-                                if attachment.parent_key not in self.state.processed_items:
-                                    self.state.processed_items.append(attachment.parent_key)
-                                    self._save_state()
-
                             # Clean up original from Zotero storage (only if file exists)
                             if file_on_disk and not dry_run:
                                 try:
@@ -1568,6 +1567,12 @@ class DEVONzotService:
                                     self._save_state()
                             else:
                                 logger.info(f"[DRY RUN] Would delete Zotero attachment item: {attachment.key}")
+
+                            # Track processed item AFTER cleanup completes
+                            if not dry_run:
+                                if attachment.parent_key not in self.state.processed_items:
+                                    self.state.processed_items.append(attachment.parent_key)
+                                    self._save_state()
                         else:
                             results['error'] += 1
                             logger.error(f"❌ Failed to update DEVONthink metadata for {attachment.key}")
@@ -1633,10 +1638,15 @@ class DEVONzotService:
             'cleaned_broken': False,
         }
 
-        # Skip if already processed
+        # Skip if already processed — but verify the file is actually gone
         if attachment.parent_key and attachment.parent_key in self.state.processed_items:
-            result['result'] = 'skipped_already_processed'
-            return result
+            file_check = Path(attachment.path) if attachment.path else None
+            if file_check and file_check.exists():
+                logger.info(f"Re-processing {attachment.key}: parent {attachment.parent_key} "
+                             f"marked processed but file still exists at {file_check}")
+            else:
+                result['result'] = 'skipped_already_processed'
+                return result
 
         # Resolve file path (linkMode=2 uses absolute paths)
         if not attachment.path:
@@ -1715,12 +1725,6 @@ class DEVONzotService:
                     result['result'] = 'success'
                     logger.info(f"✅ Migrated ZotFile attachment {attachment.key} → {dt_uuid}")
 
-                    # Track processed item and save immediately
-                    if not dry_run:
-                        if attachment.parent_key not in self.state.processed_items:
-                            self.state.processed_items.append(attachment.parent_key)
-                            self._save_state()
-
                     # Clean up original from ZotFile storage (only if file exists)
                     if file_on_disk and not dry_run:
                         try:
@@ -1772,6 +1776,12 @@ class DEVONzotService:
                             self._save_state()
                     else:
                         logger.info(f"[DRY RUN] Would delete Zotero attachment item: {attachment.key}")
+
+                    # Track processed item AFTER cleanup completes
+                    if not dry_run:
+                        if attachment.parent_key not in self.state.processed_items:
+                            self.state.processed_items.append(attachment.parent_key)
+                            self._save_state()
                 else:
                     logger.error(f"❌ Failed to update DEVONthink metadata for {attachment.key}")
             else:
