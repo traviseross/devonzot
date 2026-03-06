@@ -1361,9 +1361,11 @@ class DEVONzotService:
             'error': 0,
             'skipped': 0,
             'skipped_path_invalid': 0,
+            'cleaned_path_invalid': 0,
             'skipped_no_parent': 0,
             'skipped_parent_not_found': 0,
             'skipped_already_processed': 0,
+            'cleaned_already_processed': 0,
             'linked_existing': 0,
             'cleaned_broken': 0,
             'deleted_originals': 0,
@@ -1378,14 +1380,116 @@ class DEVONzotService:
 
         for attachment in attachments:
             try:
-                # Skip if already processed — but verify the file is actually gone
+                # Already processed — re-process if file still exists, otherwise clean up orphaned record
                 if attachment.parent_key and attachment.parent_key in self.state.processed_items:
                     storage_file = self._resolve_storage_path(attachment)
                     if storage_file and storage_file.exists():
                         logger.info(f"Re-processing {attachment.key}: parent {attachment.parent_key} "
                                      f"marked processed but storage file still exists at {storage_file}")
                     else:
-                        results['skipped_already_processed'] += 1
+                        # File is gone — delete the orphaned Zotero attachment record
+                        ct = attachment.content_type or ''
+                        has_dt_link = self._parent_has_devonthink_link(attachment.parent_key)
+                        is_web_snapshot = ct in ('text/html', 'application/xhtml+xml')
+
+                        if has_dt_link or is_web_snapshot:
+                            # Safe to delete: migration confirmed or web snapshot (no file to recover)
+                            if is_web_snapshot and not has_dt_link:
+                                reason_label = "web snapshot, no DT link needed"
+                            else:
+                                reason_label = f"parent {attachment.parent_key} has DT link"
+                            if not dry_run:
+                                try:
+                                    att_raw = self.zotero_api.get_item_raw(attachment.key)
+                                    if att_raw:
+                                        att_version = att_raw.get('data', {}).get('version', 0)
+                                        deleted = self.zotero_api.delete_attachment(attachment.key, att_version)
+                                        if deleted:
+                                            logger.info(f"✅ Cleaned orphaned record {attachment.key} "
+                                                        f"(content_type={ct}, {reason_label})")
+                                            results['cleaned_already_processed'] += 1
+                                        else:
+                                            # Queue for retry
+                                            self.state.pending_deletes.append({
+                                                'key': attachment.key, 'version': att_version
+                                            })
+                                            self._save_state()
+                                            logger.warning(f"⚠️  Queued orphaned record {attachment.key} for retry")
+                                            results['cleaned_already_processed'] += 1
+                                    else:
+                                        # Already gone from API
+                                        logger.info(f"✅ Orphaned record {attachment.key} already deleted from API")
+                                        results['cleaned_already_processed'] += 1
+                                except Exception as e:
+                                    logger.warning(f"⚠️  Failed to clean orphaned record {attachment.key}: {e}")
+                                    results['skipped_already_processed'] += 1
+                            else:
+                                logger.info(f"[DRY RUN] Would delete orphaned record {attachment.key} "
+                                            f"(content_type={ct}, {reason_label})")
+                                results['cleaned_already_processed'] += 1
+                            # Clean up empty storage folder if it exists
+                            storage_dir = Path(ZOTERO_STORAGE_PATH) / attachment.key
+                            if storage_dir.is_dir():
+                                dir_contents = [f for f in storage_dir.iterdir() if f.name != '.DS_Store']
+                                if len(dir_contents) == 0 and not dry_run:
+                                    ds_store = storage_dir / '.DS_Store'
+                                    if ds_store.exists():
+                                        ds_store.unlink()
+                                    if not any(storage_dir.iterdir()):
+                                        storage_dir.rmdir()
+                                        logger.info(f"🗑️  Cleaned empty folder: {storage_dir.name}")
+                                        results['cleaned_empty_folders'] += 1
+                        else:
+                            # No DT link — search DEVONthink before deleting
+                            parent_item = self.zotero_api.get_item(attachment.parent_key)
+                            if parent_item:
+                                filename = FilenameGenerator.generate_filename(parent_item)
+                                zotero_filename = self._get_zotero_filename(attachment)
+                                dt_uuid = self._find_or_adopt_in_devonthink(filename, zotero_filename, dry_run)
+                                if dt_uuid:
+                                    # Found in DEVONthink — create the missing link
+                                    logger.info(f"🔗 Found orphan {attachment.key} in DEVONthink: {dt_uuid}")
+                                    if not dry_run:
+                                        self._create_devonthink_child_link(
+                                            attachment.parent_key, dt_uuid,
+                                            title="DEVONthink Link", dry_run=False
+                                        )
+                                    else:
+                                        logger.info(f"[DRY RUN] Would create DT link for {attachment.parent_key}")
+                                    reason_label = f"found in DEVONthink ({dt_uuid}), link created"
+                                else:
+                                    reason_label = "not found in DEVONthink, file gone"
+                            else:
+                                reason_label = "parent not found in API, file gone"
+
+                            # Delete the orphaned attachment record either way
+                            if not dry_run:
+                                try:
+                                    att_raw = self.zotero_api.get_item_raw(attachment.key)
+                                    if att_raw:
+                                        att_version = att_raw.get('data', {}).get('version', 0)
+                                        deleted = self.zotero_api.delete_attachment(attachment.key, att_version)
+                                        if deleted:
+                                            logger.info(f"✅ Cleaned orphaned record {attachment.key} "
+                                                        f"(content_type={ct}, {reason_label})")
+                                            results['cleaned_already_processed'] += 1
+                                        else:
+                                            self.state.pending_deletes.append({
+                                                'key': attachment.key, 'version': att_version
+                                            })
+                                            self._save_state()
+                                            logger.warning(f"⚠️  Queued orphaned record {attachment.key} for retry")
+                                            results['cleaned_already_processed'] += 1
+                                    else:
+                                        logger.info(f"✅ Orphaned record {attachment.key} already deleted from API")
+                                        results['cleaned_already_processed'] += 1
+                                except Exception as e:
+                                    logger.warning(f"⚠️  Failed to clean orphaned record {attachment.key}: {e}")
+                                    results['skipped_already_processed'] += 1
+                            else:
+                                logger.info(f"[DRY RUN] Would delete orphaned record {attachment.key} "
+                                            f"(content_type={ct}, {reason_label})")
+                                results['cleaned_already_processed'] += 1
                         continue
 
                 # Resolve file path
@@ -1426,15 +1530,51 @@ class DEVONzotService:
                             results['cleaned_empty_folders'] += 1
                         continue
 
-                    reason = "Invalid or unresolvable path"
-                    logger.warning(f"⚠️  Attachment {attachment.key}: {reason} - {attachment.path}")
-                    results['skipped_path_invalid'] += 1
-                    results['skipped'] += 1
-                    skipped_details.append({
-                        'key': attachment.key,
-                        'reason': reason,
-                        'path': attachment.path
-                    })
+                    # No resolvable path — check if storage folder exists
+                    storage_dir_check = Path(ZOTERO_STORAGE_PATH) / attachment.key
+                    if storage_dir_check.is_dir() and any(
+                        f for f in storage_dir_check.iterdir() if f.name != '.DS_Store'
+                    ):
+                        # Folder has files but path couldn't resolve — needs investigation
+                        reason = "Invalid or unresolvable path (folder has files)"
+                        logger.warning(f"⚠️  Attachment {attachment.key}: {reason} - {attachment.path}")
+                        results['skipped_path_invalid'] += 1
+                        results['skipped'] += 1
+                        skipped_details.append({
+                            'key': attachment.key,
+                            'reason': reason,
+                            'path': attachment.path
+                        })
+                    else:
+                        # No folder at all (or empty) — ghost record, delete it
+                        if not dry_run:
+                            try:
+                                att_raw = self.zotero_api.get_item_raw(attachment.key)
+                                if att_raw:
+                                    att_version = att_raw.get('data', {}).get('version', 0)
+                                    deleted = self.zotero_api.delete_attachment(attachment.key, att_version)
+                                    if deleted:
+                                        logger.info(f"✅ Cleaned ghost record {attachment.key} "
+                                                    f"(filename={attachment.filename}, no path, no storage folder)")
+                                        results['cleaned_path_invalid'] += 1
+                                    else:
+                                        self.state.pending_deletes.append({
+                                            'key': attachment.key, 'version': att_version
+                                        })
+                                        self._save_state()
+                                        logger.warning(f"⚠️  Queued ghost record {attachment.key} for retry")
+                                        results['cleaned_path_invalid'] += 1
+                                else:
+                                    logger.info(f"✅ Ghost record {attachment.key} already deleted from API")
+                                    results['cleaned_path_invalid'] += 1
+                            except Exception as e:
+                                logger.warning(f"⚠️  Failed to clean ghost record {attachment.key}: {e}")
+                                results['skipped_path_invalid'] += 1
+                                results['skipped'] += 1
+                        else:
+                            logger.info(f"[DRY RUN] Would delete ghost record {attachment.key} "
+                                        f"(filename={attachment.filename}, no path, no storage folder)")
+                            results['cleaned_path_invalid'] += 1
                     continue
 
                 file_on_disk = file_path.exists()
@@ -1642,6 +1782,10 @@ class DEVONzotService:
         logger.info(f"     - No parent: {results['skipped_no_parent']}")
         logger.info(f"     - Parent not found: {results['skipped_parent_not_found']}")
         logger.info(f"     - Already processed: {results['skipped_already_processed']}")
+        if results['cleaned_already_processed']:
+            logger.info(f"  🧹 Cleaned orphaned records: {results['cleaned_already_processed']}")
+        if results['cleaned_path_invalid']:
+            logger.info(f"  🧹 Cleaned ghost records (no path/folder): {results['cleaned_path_invalid']}")
 
         return results
 
