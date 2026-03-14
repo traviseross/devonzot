@@ -24,6 +24,7 @@ import hashlib
 import shutil
 import re
 import logging
+from logging.handlers import RotatingFileHandler
 import asyncio
 from pathlib import Path
 from dataclasses import dataclass, asdict
@@ -71,7 +72,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(LOG_FILE),
+        RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=3),
         logging.StreamHandler()
     ]
 )
@@ -264,14 +265,13 @@ class DEVONthinkInterface:
     def is_devonthink_running(self) -> bool:
         """Check if DEVONthink is running"""
         try:
-            script = '''
-            tell application "System Events"
-                return (name of processes) contains "DEVONthink 3"
-            end tell
-            '''
-            result = self.execute_script(script, timeout=5)
-            return result.lower() == "true"
-        except:
+            result = subprocess.run(
+                ['pgrep', '-f', 'DEVONthink 3'],
+                capture_output=True, timeout=5
+            )
+            return result.returncode == 0
+        except Exception as e:
+            logger.debug(f"DEVONthink running check failed: {e}")
             return False
     
     def wait_for_devonthink(self, max_wait: int = 30) -> bool:
