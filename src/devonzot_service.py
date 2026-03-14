@@ -73,7 +73,6 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=3),
-        logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
@@ -116,6 +115,7 @@ class ServiceState:
     last_sync: Optional[str] = None
     last_zotero_check: Optional[str] = None
     last_library_version: Optional[int] = None
+    last_phase0_library_version: Optional[int] = None
     processed_items: List[str] = None
     restart_count: int = 0
     dry_run_results: Dict[str, Any] = None
@@ -1125,11 +1125,26 @@ class DEVONzotService:
             'skipped': 0,
         }
 
+        # Skip full fetch if library hasn't changed since last Phase 0 run
+        if self.state.last_phase0_library_version and not dry_run:
+            changed = self.zotero_api.get_changed_item_versions(
+                self.state.last_phase0_library_version, item_type='attachment'
+            )
+            if not changed:
+                logger.info(
+                    f"Phase 0: library unchanged since version "
+                    f"{self.state.last_phase0_library_version}, skipping full fetch"
+                )
+                return results
+
         attachments = self.zotero_api.get_imported_url_attachments()
         results['total_found'] = len(attachments)
 
         if not attachments:
             logger.info("No imported_url attachments found.")
+            if not dry_run and self.zotero_api.last_library_version:
+                self.state.last_phase0_library_version = self.zotero_api.last_library_version
+                self._save_state()
             return results
 
         logger.info(f"Found {len(attachments)} imported_url attachments to delete")
@@ -1215,6 +1230,10 @@ class DEVONzotService:
             logger.info(f"  API items deleted: {results['items_deleted']}")
         logger.info(f"  Files missing: {results['files_missing']}")
         logger.info(f"  API items failed: {results['items_failed']}")
+
+        if not dry_run and self.zotero_api.last_library_version:
+            self.state.last_phase0_library_version = self.zotero_api.last_library_version
+            self._save_state()
 
         return results
 
@@ -1998,17 +2017,19 @@ class DEVONzotService:
 
                             if dt_uuid and dt_uuid != "dry-run-uuid":
                                 # Get parent item for metadata update
-                                if symlink.parent_key:
-                                    parent_item = self.zotero_api.get_item(symlink.parent_key)
-                                    if parent_item:
-                                        # Create linked_url child with DEVONthink link
-                                        link_title = Path(symlink.path).name if symlink.path else "DEVONthink Link"
-                                        if self._create_devonthink_child_link(symlink.parent_key, dt_uuid, title=link_title, dry_run=dry_run):
-                                            # Update DEVONthink metadata
-                                            if await self.devonthink_update_metadata_async(dt_uuid, parent_item, dry_run):
-                                                results['success'] += 1
-                                                logger.info(f"Converted symlink {symlink.key} → {dt_uuid}")
-                                                continue
+                                link_title = Path(symlink.path).name if symlink.path else "DEVONthink Link"
+                                if not symlink.parent_key:
+                                    logger.warning(f"Symlink {symlink.key}: no parent_key, cannot link to {dt_uuid}")
+                                elif not (parent_item := self.zotero_api.get_item(symlink.parent_key)):
+                                    logger.warning(f"Symlink {symlink.key}: parent {symlink.parent_key} not found in Zotero")
+                                elif not self._create_devonthink_child_link(symlink.parent_key, dt_uuid, title=link_title, dry_run=dry_run):
+                                    logger.warning(f"Symlink {symlink.key}: failed to create DEVONthink child link for parent {symlink.parent_key}")
+                                elif not await self.devonthink_update_metadata_async(dt_uuid, parent_item, dry_run):
+                                    logger.warning(f"Symlink {symlink.key}: metadata update failed for {dt_uuid}")
+                                else:
+                                    results['success'] += 1
+                                    logger.info(f"Converted symlink {symlink.key} → {dt_uuid}")
+                                    continue
 
                                 results['error'] += 1
                             elif dt_uuid == "dry-run-uuid":

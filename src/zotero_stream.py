@@ -12,6 +12,8 @@ Reference: https://www.zotero.org/support/dev/web_api/v3/streaming_api
 import asyncio
 import json
 import logging
+import ssl
+import certifi
 from typing import Callable, Awaitable
 
 from websockets.asyncio.client import connect
@@ -45,10 +47,11 @@ class ZoteroStreamClient:
         """Connect, subscribe, and listen for events.  Reconnects on failure."""
         self._running = True
         retry_delay = self.initial_retry
+        _ssl_ctx = ssl.create_default_context(cafile=certifi.where())
 
         while self._running:
             try:
-                async with connect(STREAM_URL) as ws:
+                async with connect(STREAM_URL, ssl=_ssl_ctx) as ws:
                     self._ws = ws
                     retry_delay = self.initial_retry  # reset on successful connect
 
