@@ -115,7 +115,7 @@ class ZoteroAPIClient:
                 break
 
             version = response.headers.get('Last-Modified-Version')
-            if version:
+            if version and start == 0:  # Capture version from first page only
                 self.last_library_version = int(version)
 
             items = response.json()
@@ -367,6 +367,40 @@ class ZoteroAPIClient:
                 result.append(self._api_item_to_zotero_attachment(api_item))
 
         return result
+
+    # ── File download ─────────────────────────────────────────────
+
+    def download_attachment_file(self, item_key: str, dest_path: 'Path') -> bool:
+        """Download an attachment file from Zotero cloud storage.
+
+        Calls GET /users/{user_id}/items/{item_key}/file (follows redirect).
+        Writes binary content to dest_path.  Returns True on success.
+        """
+        from pathlib import Path
+        dest_path = Path(dest_path)
+
+        self._rate_limit()
+        url = f'{self.api_base}/users/{self.user_id}/items/{item_key}/file'
+        try:
+            response = self.session.get(url, timeout=120, stream=True, allow_redirects=True)
+            if response.status_code != 200:
+                logger.warning(
+                    f"Zotero file download failed for {item_key}: "
+                    f"HTTP {response.status_code}"
+                )
+                return False
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(dest_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            logger.info(f"Downloaded attachment {item_key} → {dest_path.name} "
+                        f"({dest_path.stat().st_size // 1024} KB)")
+            return True
+        except Exception as e:
+            logger.warning(f"Zotero file download error for {item_key}: {e}")
+            if dest_path.exists():
+                dest_path.unlink()  # clean up partial file
+            return False
 
     # ── Item mutation ──────────────────────────────────────────────
 

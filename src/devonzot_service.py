@@ -61,6 +61,7 @@ DEVONTHINK_WAIT_TIME = 3  # Reduced wait time for faster processing
 MAX_RESTART_ATTEMPTS = 3
 RESTART_DELAY = 30  # seconds
 BATCH_SIZE = 50  # Items to process concurrently
+MAX_DOWNLOAD_RETRIES = 20  # Drop from pending_downloads after this many failures
 
 # Streaming configuration
 WEBSOCKET_ENABLED = os.environ.get("WEBSOCKET_ENABLED", "true").lower() == "true"
@@ -120,6 +121,7 @@ class ServiceState:
     restart_count: int = 0
     dry_run_results: Dict[str, Any] = None
     pending_deletes: List[Dict[str, Any]] = None
+    pending_downloads: List[Dict[str, Any]] = None
 
     def __post_init__(self):
         if self.processed_items is None:
@@ -132,6 +134,8 @@ class ServiceState:
             self.dry_run_results = {}
         if self.pending_deletes is None:
             self.pending_deletes = []
+        if self.pending_downloads is None:
+            self.pending_downloads = []
 
 class FilenameGenerator:
     """Smart filename generation with configurable patterns"""
@@ -1345,6 +1349,72 @@ class DEVONzotService:
         logger.info(f"Pending deletes: {results['deleted']} deleted, {results['failed']} still pending")
         return results
 
+    def retry_pending_downloads(self, dry_run=False) -> Dict[str, int]:
+        """Retry downloading attachment files that failed in previous cycles.
+
+        Downloads files to local Zotero storage only — the caller is responsible
+        for triggering Phase 1A (migrate_stored_attachments) to complete migration.
+        """
+        results = {'retried': 0, 'downloaded': 0, 'failed': 0, 'expired': 0}
+
+        if not self.state.pending_downloads:
+            return results
+
+        n = len(self.state.pending_downloads)
+        logger.info(f"Retrying {n} pending attachment download(s)...")
+
+        if dry_run:
+            results['retried'] = n
+            logger.info(f"[DRY RUN] Pending downloads: would retry {n}")
+            return results
+
+        remaining = []
+        results['retried'] = n
+
+        for pending in self.state.pending_downloads:
+            key = pending['key']
+            filename = pending['filename']
+            retry_count = pending.get('retry_count', 0)
+
+            # Check if attachment still exists in Zotero
+            att_item = self.zotero_api.get_item_raw(key)
+            if att_item is None:
+                logger.info(f"Pending download {key}: attachment no longer exists — removed from queue")
+                continue
+
+            # Check if file already appeared on disk (e.g. Zotero synced it)
+            dest_path = Path(ZOTERO_STORAGE_PATH) / key / filename
+            if dest_path.exists():
+                logger.info(f"✅ Pending download {key}: file already on disk — removed from queue")
+                results['downloaded'] += 1
+                continue
+
+            # Attempt download
+            logger.info(f"⬇️  Retrying download for {key} (attempt {retry_count + 1})...")
+            if self.zotero_api.download_attachment_file(key, dest_path):
+                logger.info(f"✅ Downloaded pending attachment {key}: {filename}")
+                results['downloaded'] += 1
+            else:
+                retry_count += 1
+                if retry_count >= MAX_DOWNLOAD_RETRIES:
+                    logger.warning(
+                        f"⚠️  Dropping {key} from download queue after {retry_count} failed attempts "
+                        f"(parent: {pending.get('parent_key', '?')})"
+                    )
+                    results['expired'] += 1
+                else:
+                    pending['retry_count'] = retry_count
+                    remaining.append(pending)
+                    results['failed'] += 1
+
+        self.state.pending_downloads = remaining
+        self._save_state()
+        logger.info(
+            f"Pending downloads: {results['downloaded']} downloaded, "
+            f"{results['failed']} still pending, {results['expired']} expired"
+        )
+        return results
+
     def migrate_stored_attachments(self, dry_run=False, interactive=False) -> Dict[str, int]:
         """Migrate Zotero stored files to DEVONthink with comprehensive tracking"""
         logger.info("📁 Starting migration of stored attachments...")
@@ -1379,6 +1449,27 @@ class DEVONzotService:
 
                 # Resolve file path
                 file_path = self._resolve_storage_path(attachment)
+
+                # If file not on disk, try downloading from Zotero cloud
+                if not file_path and not dry_run and attachment.filename:
+                    dest_path = Path(ZOTERO_STORAGE_PATH) / attachment.key / attachment.filename
+                    logger.info(f"⬇️  Attachment {attachment.key}: file not local, attempting Zotero cloud download...")
+                    if self.zotero_api.download_attachment_file(attachment.key, dest_path):
+                        file_path = dest_path
+                    else:
+                        logger.warning(f"⚠️  Attachment {attachment.key}: Zotero cloud download failed — queued for retry")
+                        pending_keys = {p['key'] for p in self.state.pending_downloads}
+                        if attachment.key not in pending_keys:
+                            self.state.pending_downloads.append({
+                                'key': attachment.key,
+                                'filename': attachment.filename,
+                                'parent_key': attachment.parent_key,
+                                'retry_count': 0,
+                                'queued_at': datetime.now().isoformat(),
+                            })
+                            self._save_state()
+                        continue
+
                 if not file_path:
                     # Check if storage folder exists but is empty (only .DS_Store)
                     storage_dir = Path(ZOTERO_STORAGE_PATH) / attachment.key
@@ -2275,6 +2366,7 @@ class DEVONzotService:
             processed_count = 0
             skipped_count = 0
             error_count = 0
+            has_stored_imports = False
 
             for api_item in changed_items:
                 data = api_item.get('data', {})
@@ -2333,8 +2425,44 @@ class DEVONzotService:
                     else:
                         logger.info(f"[DRY RUN] Would delete imported_url: {attachment.key}")
                 elif link_mode == 'imported_file':
-                    # Phase 1A: leave for full cycle
-                    skipped_count += 1
+                    has_stored_imports = True
+
+            # Retry pending downloads — if any succeed, trigger Phase 1A
+            if self.state.pending_downloads and not dry_run:
+                pending_dl_results = self.retry_pending_downloads(dry_run)
+                if pending_dl_results.get('downloaded', 0) > 0:
+                    has_stored_imports = True
+
+            # Step 3b: Process any new stored (linkMode=0) attachments
+            if has_stored_imports and not dry_run:
+                logger.info("New imported_file attachment(s) detected — running Phase 1A migration...")
+                self.zotero_api.invalidate_caches()
+                phase1a_results = self.migrate_stored_attachments(dry_run=False)
+                processed_count += phase1a_results.get('success', 0)
+                error_count += phase1a_results.get('error', 0)
+                skipped_count += phase1a_results.get('skipped', 0)
+
+                # Check for items that arrived during the long Phase 1A fetch
+                post_phase1a_version = self.zotero_api.last_library_version
+                if post_phase1a_version and post_phase1a_version > since_version:
+                    gap_keys = self.zotero_api.get_changed_item_versions(
+                        since_version, item_type='attachment'
+                    )
+                    if gap_keys:
+                        new_imports = any(
+                            (api_item := self.zotero_api.get_item_raw(key)) and
+                            api_item.get('data', {}).get('linkMode') == 'imported_file'
+                            for key in gap_keys
+                        )
+                        if new_imports:
+                            logger.info(
+                                f"Version drift detected ({since_version} → {post_phase1a_version}) "
+                                f"— re-running Phase 1A for items that arrived during fetch"
+                            )
+                            self.zotero_api.invalidate_caches()
+                            gap_results = self.migrate_stored_attachments(dry_run=False)
+                            processed_count += gap_results.get('success', 0)
+                            error_count += gap_results.get('error', 0)
 
             # Step 4: Check for deletions
             deleted = self.zotero_api.get_deleted_since(since_version)
@@ -2420,6 +2548,11 @@ class DEVONzotService:
             if interactive and self._interactive_quit:
                 logger.info("[INTERACTIVE] User quit - stopping cycle early.")
                 return True
+
+            # Retry pending downloads from previous cycles
+            pending_dl_results = self.retry_pending_downloads(dry_run)
+            if pending_dl_results['retried'] > 0:
+                logger.info(f"Pending downloads retry: {pending_dl_results}")
 
             # Phase 0: Delete imported_url attachments (useless URL snapshots)
             await self._wait_if_paused_async()
