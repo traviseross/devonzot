@@ -716,6 +716,7 @@ class DEVONzotService:
         self.paused = False
         self.restart_count = 0
         self._interactive_quit = False
+        self._tier2_task: Optional[asyncio.Task] = None
 
         # Ensure DEVONzot directory exists
         DEVONZOT_PATH.mkdir(exist_ok=True)
@@ -742,10 +743,12 @@ class DEVONzotService:
         return ServiceState()
     
     def _save_state(self):
-        """Save service state to file"""
+        """Save service state to file atomically (tmp + rename)."""
         try:
-            with open(STATE_FILE, 'w') as f:
+            tmp_path = STATE_FILE.with_suffix(STATE_FILE.suffix + '.tmp')
+            with open(tmp_path, 'w') as f:
                 json.dump(asdict(self.state), f, indent=2, default=str)
+            os.replace(tmp_path, STATE_FILE)
         except Exception as e:
             logger.error(f"Could not save state: {e}")
     
@@ -2718,9 +2721,72 @@ class DEVONzotService:
 
         # ── Task 2: Sync worker ────────────────────────────────────
         async def sync_worker():
-            # Initial catch-up sync (full cycle to close any gap)
-            logger.info("Running initial catch-up sync...")
-            await self.run_service_cycle_async(dry_run=False)
+            # Tier 1: essential, fast, runs upfront (blocks listener).
+            # Cleans up the retry queues and runs the cheap Phase 0 skip
+            # check so we don't start processing events on a stale state.
+            logger.info("Startup Tier 1: retry queues + Phase 0 skip check")
+            try:
+                pending_results = self.retry_pending_deletes(dry_run=False)
+                if pending_results['retried'] > 0:
+                    logger.info(f"Pending deletes retry: {pending_results}")
+
+                pending_dl_results = self.retry_pending_downloads(dry_run=False)
+                if pending_dl_results['retried'] > 0:
+                    logger.info(f"Pending downloads retry: {pending_dl_results}")
+
+                phase0_results = self.delete_imported_url_attachments(dry_run=False)
+                if phase0_results.get('items_deleted', 0) > 0:
+                    logger.info(f"Phase 0: {phase0_results}")
+                    self.zotero_api.invalidate_caches()
+            except Exception as e:
+                logger.error(f"Tier 1 startup failed: {e}", exc_info=True)
+
+            logger.info("✅ Listener ready for events")
+
+            # Tier 2: deferrable migrations (Phase 1A/1B/2/3). Runs as a
+            # background task so the event loop below starts processing
+            # WebSocket events immediately instead of waiting minutes.
+            async def run_deferred_migrations():
+                try:
+                    logger.info("Startup Tier 2 (background): Phase 1A → 1B → 2 → 3")
+
+                    await self._wait_if_paused_async()
+                    logger.info("PHASE 1A: Migrating linkMode=0 (Zotero storage) attachments")
+                    m1a = self.migrate_stored_attachments(dry_run=False)
+                    logger.info(f"Phase 1A complete: {m1a}")
+
+                    await self._wait_if_paused_async()
+                    logger.info("PHASE 1B: Migrating linkMode=2 (ZotFile Import) attachments")
+                    m1b = self.migrate_zotfile_attachments(dry_run=False)
+                    logger.info(f"Phase 1B complete: {m1b}")
+
+                    await self._wait_if_paused_async()
+                    logger.info("PHASE 2: Converting existing ZotFile symlinks to UUID links")
+                    conv = await self.convert_zotfile_symlinks_async(
+                        dry_run=False, batch_size=50
+                    )
+                    logger.info(f"Phase 2 complete: {conv}")
+
+                    await self._wait_if_paused_async()
+                    logger.info("PHASE 3: Syncing new items")
+                    s3 = self.sync_new_items(dry_run=False)
+                    logger.info(f"Phase 3 complete: {s3}")
+
+                    if self.zotero_api.last_library_version:
+                        self.state.last_library_version = (
+                            self.zotero_api.last_library_version
+                        )
+                        self._save_state()
+                    logger.info("🎉 Deferred startup migrations complete")
+                except asyncio.CancelledError:
+                    logger.info("Deferred migrations cancelled")
+                    raise
+                except Exception as e:
+                    logger.error(
+                        f"Deferred migration task failed: {e}", exc_info=True
+                    )
+
+            self._tier2_task = asyncio.create_task(run_deferred_migrations())
 
             while self.running:
                 try:
@@ -2801,6 +2867,12 @@ class DEVONzotService:
             logger.info("Service cancelled")
         finally:
             self.running = False
+            if self._tier2_task is not None and not self._tier2_task.done():
+                self._tier2_task.cancel()
+                try:
+                    await self._tier2_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             await stream_client.stop()
             if PID_FILE.exists():
                 PID_FILE.unlink()
@@ -2859,6 +2931,16 @@ def main():
         return
 
     if args.service:
+        try:
+            startup_delay = int(os.environ.get("DEVONZOT_STARTUP_DELAY", "0"))
+        except ValueError:
+            startup_delay = 0
+        if startup_delay > 0:
+            logger.info(
+                f"Startup delay: sleeping {startup_delay}s before service init "
+                f"(DEVONZOT_STARTUP_DELAY)"
+            )
+            time.sleep(startup_delay)
         if WEBSOCKET_ENABLED and not args.no_stream:
             asyncio.run(service.run_streaming_service())
         else:
