@@ -34,6 +34,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 from zotero_api_client import ZoteroAPIClient
+from devonthink_mcp import DevonthinkMCP, DevonthinkMCPError
 
 # Load environment variables
 load_dotenv(Path(__file__).resolve().parent.parent / '.env')
@@ -50,6 +51,10 @@ ZOTERO_STORAGE_PATH = "/Users/travisross/Zotero/storage"
 ZOTFILE_IMPORT_PATH = "/Users/travisross/ZotFile Import"
 DEVONTHINK_INBOX_PATH = "/Users/travisross/Library/Application Support/DEVONthink/Inbox"
 DEVONTHINK_DATABASE = "Professional"
+DEVONTHINK_GLOBAL_INBOX = "Global Inbox"
+# DEVONthink control backend: MCP (token auth, no AppleScript/TCC) vs legacy AppleScript.
+# Default OFF so deploying the code does not change behavior until DEVONZOT_USE_MCP is set in .env.
+USE_MCP = os.environ.get("DEVONZOT_USE_MCP", "false").strip().lower() in ("1", "true", "yes", "on")
 DEVONZOT_PATH = Path("/Users/travisross/DEVONzot")
 STATE_FILE = DEVONZOT_PATH / "service_state.json"
 LOG_FILE = DEVONZOT_PATH / "service.log"
@@ -580,6 +585,161 @@ class DEVONthinkInterface:
             logger.error(f"Failed to rename {uuid}: {e}")
             return False
 
+class DEVONthinkMCPInterface:
+    """DEVONthink control via the built-in MCP server (token auth, no AppleScript/TCC).
+
+    Drop-in replacement for DEVONthinkInterface with the same public surface.
+    `import_file` imports a file and returns its record UUID directly, so the
+    legacy copy-to-Inbox -> wait -> title-search dance collapses into one call.
+    """
+
+    DATABASES = ["Global Inbox", "Professional", "Articles", "Books", "Research"]
+    STOP_WORDS = {'the', 'and', 'for', 'not', 'but', 'with', 'from', 'that', 'this',
+                  'they', 'what', 'who', 'how', 'why', 'two', 'one', 'its', 'has',
+                  'had', 'was', 'are', 'were', 'been', 'will', 'can', 'may', 'did',
+                  'does', 'have', 'after', 'before', 'about', 'into', 'over', 'also'}
+
+    def __init__(self, database_name: str = "Professional"):
+        self.database_name = database_name
+        self.mcp = DevonthinkMCP()
+        self._pending_import_uuid = None
+
+    def is_devonthink_running(self) -> bool:
+        return self.mcp.is_running()
+
+    @classmethod
+    def _keywords(cls, filename: str) -> List[str]:
+        ascii_name = ''.join(c if ord(c) < 128 else ' ' for c in filename)
+        ascii_name = ''.join(c if c.isalnum() or c == ' ' else ' ' for c in ascii_name)
+        words = [w for w in ascii_name.split()
+                 if len(w) >= 4 and w.lower() not in cls.STOP_WORDS and not w.isdigit()]
+        if not words:
+            words = [w for w in ascii_name.split() if len(w) >= 3 and not w.isdigit()]
+        return words[:4]
+
+    def _search_database_for_filename(self, filename: str, database_name: str) -> Optional[str]:
+        words = self._keywords(filename)
+        if not words:
+            return None
+        query = ' '.join(f'name:{w}' for w in words)
+        try:
+            db_uuid = self.mcp.database_uuid(database_name)
+            res = self.mcp.search_records(query=query, database_uuid=db_uuid, limit=1)
+            results = res.get('results') if isinstance(res, dict) else res
+            if results:
+                return results[0].get('uuid')
+        except DevonthinkMCPError as e:
+            logger.debug(f"MCP search failed in {database_name}: {e}")
+        return None
+
+    def copy_file_to_inbox(self, file_path: str, new_filename: str, dry_run=False) -> bool:
+        """Import the file into the Global Inbox via MCP; stash the resulting UUID."""
+        if dry_run:
+            logger.info(f"[DRY RUN] Would import {file_path} to Global Inbox as '{new_filename}'")
+            self._pending_import_uuid = "dry-run-uuid"
+            return True
+        if not Path(file_path).exists():
+            logger.error(f"Source file not found: {file_path}")
+            return False
+        try:
+            inbox_uuid = self.mcp.database_uuid(DEVONTHINK_GLOBAL_INBOX)
+            rec = self.mcp.import_file(file_path, database_uuid=inbox_uuid)
+            uuid = rec.get("uuid") if isinstance(rec, dict) else None
+            if not uuid:
+                logger.error(f"MCP import returned no UUID for {file_path}: {rec}")
+                return False
+            try:
+                self.mcp.update_record(uuid, name=new_filename)
+            except DevonthinkMCPError as e:
+                logger.warning(f"Imported {uuid} but rename to '{new_filename}' failed: {e}")
+            self._pending_import_uuid = uuid
+            logger.info(f"Imported to Global Inbox: {new_filename} -> {uuid}")
+            return True
+        except DevonthinkMCPError as e:
+            logger.error(f"MCP import failed for {file_path}: {e}")
+            return False
+
+    def find_item_by_filename_after_wait(self, filename: str, dry_run=False) -> Optional[str]:
+        """Return the UUID from the just-completed import; fall back to a search."""
+        if dry_run:
+            return "dry-run-uuid"
+        if self._pending_import_uuid:
+            uuid = self._pending_import_uuid
+            self._pending_import_uuid = None
+            return uuid
+        for db in self.DATABASES:
+            uuid = self._search_database_for_filename(filename, db)
+            if uuid:
+                return uuid
+        return None
+
+    async def find_item_by_filename_after_wait_async(self, filename: str, dry_run=False) -> Optional[str]:
+        if dry_run:
+            await asyncio.sleep(0.01)
+            return "dry-run-uuid"
+        for db in self.DATABASES:
+            uuid = self._search_database_for_filename(filename, db)
+            if uuid:
+                return uuid
+        return None
+
+    async def batch_search_items(self, filenames: List[str], dry_run=False) -> Dict[str, Optional[str]]:
+        if dry_run:
+            await asyncio.sleep(0.01)
+            return {f: "dry-run-uuid" for f in filenames}
+        out = {}
+        for f in filenames:
+            out[f] = await self.find_item_by_filename_after_wait_async(f, dry_run)
+        return out
+
+    def update_item_metadata(self, uuid: str, item: "ZoteroItem", dry_run=False) -> bool:
+        if dry_run:
+            logger.info(f"[DRY RUN] Would update metadata for UUID: {uuid}")
+            return True
+        authors = ", ".join(
+            f"{c.get('firstName', '')} {c.get('lastName', '')}".strip()
+            for c in item.creators if c.get('lastName')
+        )
+        parts = [f"Zotero Key: {item.key or ''}"]
+        if authors:
+            parts.append(f"Authors: {authors}")
+        if item.publication:
+            parts.append(f"Publication: {item.publication}")
+        if item.year:
+            parts.append(f"Year: {item.year}")
+        if item.doi:
+            parts.append(f"DOI: {item.doi}")
+        if item.abstract:
+            parts.append(f"Abstract: {item.abstract[:500]}")
+        comment = "\n".join(parts)
+
+        tags = [t for t in (list(item.tags) + list(item.collections)) if t]
+        if item.item_type:
+            tags.append(item.item_type)
+        if item.year:
+            tags.append(str(item.year))
+
+        try:
+            self.mcp.update_record(uuid, comment=comment, tags=tags or None)
+            logger.info(f"Updated metadata for DEVONthink item: {uuid}")
+            return True
+        except DevonthinkMCPError as e:
+            logger.error(f"Failed to update metadata for {uuid}: {e}")
+            return False
+
+    def rename_item(self, uuid: str, new_name: str, dry_run=False) -> bool:
+        if dry_run:
+            logger.info(f"[DRY RUN] Would rename UUID {uuid} to '{new_name}'")
+            return True
+        try:
+            self.mcp.update_record(uuid, name=new_name)
+            logger.info(f"Renamed DEVONthink item {uuid} to '{new_name}'")
+            return True
+        except DevonthinkMCPError as e:
+            logger.error(f"Failed to rename {uuid}: {e}")
+            return False
+
+
 class ConflictDetector:
     """Detect conflicts, duplicates, and unmatched files for dry run mode"""
     
@@ -734,7 +894,12 @@ class DEVONzotService:
             api_version=API_VERSION,
             rate_limit_delay=RATE_LIMIT_DELAY,
         )
-        self.devonthink = DEVONthinkInterface(DEVONTHINK_DATABASE)
+        if USE_MCP:
+            self.devonthink = DEVONthinkMCPInterface(DEVONTHINK_DATABASE)
+            logger.info("DEVONthink control backend: MCP (token auth, no AppleScript/TCC)")
+        else:
+            self.devonthink = DEVONthinkInterface(DEVONTHINK_DATABASE)
+            logger.info("DEVONthink control backend: AppleScript (legacy)")
         self.conflict_detector = ConflictDetector(self.zotero_api, self.devonthink)
         self.state = self._load_state()
         self.running = False
