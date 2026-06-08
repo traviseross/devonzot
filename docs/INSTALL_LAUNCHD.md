@@ -1,59 +1,58 @@
 # DEVONzot Launchd Setup Guide
 
-## Installation Steps
+DEVONzot runs as a **single** launchd agent — `com.devonzot.service` — which runs
+`src/devonzot_service.py --service` (a perpetual streaming service).
 
-1. **Copy the launchd plist file**
-   - From the repo: `config/com.devonzot.addnew.plist`
-   - To: `~/Library/LaunchAgents/com.devonzot.addnew.plist`
+> **Note:** the older `com.devonzot.addnew` job (`devonzot_add_new.py --loop15`)
+> is **retired** (moved to `ARCHIVE/`). Its job — converting `linked_file`
+> ZotFile symlinks into `x-devonthink-item://` links — is fully covered by the
+> main service's Phase 1B/Phase 2. Do not reinstall it.
 
-2. **Edit the plist if needed**
-   - Update paths for your system (Python interpreter, script path, log paths).
-   - The script path must include the `src/` prefix, for example:
-     ```
-     /Users/yourname/DEVONzot/src/devonzot_service.py
-     ```
-   - The Python path should point to the venv interpreter:
-     ```
-     /Users/yourname/DEVONzot/venv/bin/python3
-     ```
+## Prerequisites
 
-3. **Load the job**
+- **DEVONthink 4** running, with its **MCP server enabled** (DEVONthink →
+  Settings → AI → MCP).
+- `.env` present and configured, including:
+  - `ZOTERO_API_KEY`, `ZOTERO_USER_ID`
+  - `DEVONZOT_USE_MCP=true`
+  - `DEVONTHINK_MCP_TOKEN=<bearer token from DEVONthink's MCP settings>`
+  - `DEVONTHINK_MCP_URL=http://localhost:8420` (default)
+- A working virtualenv at `venv/` with dependencies installed.
 
-   macOS 12 and later (recommended):
-   ```
-   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.devonzot.addnew.plist
-   ```
+## Installation
 
-   macOS 11 and earlier (deprecated fallback):
-   ```
-   launchctl load ~/Library/LaunchAgents/com.devonzot.addnew.plist
-   ```
+1. **Copy the plist** `com.devonzot.service.plist` to
+   `~/Library/LaunchAgents/com.devonzot.service.plist`.
 
-4. **Check logs**
-   - `launchd_stdout.log` and `launchd_stderr.log` in your DEVONzot directory.
-   - Also check `service.log` for the service's own runtime output.
+2. **Edit paths** in the plist for your system:
+   - Python interpreter: `/Users/<you>/DEVONzot/venv/bin/python`
+   - Script: `/Users/<you>/DEVONzot/src/devonzot_service.py` (note the `src/` prefix), argument `--service`
 
-5. **Unload the job (to stop)**
-
-   macOS 12 and later (recommended):
-   ```
-   launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.devonzot.addnew.plist
+3. **Load the job** (macOS 12+):
+   ```bash
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.devonzot.service.plist
    ```
 
-   macOS 11 and earlier (deprecated fallback):
-   ```
-   launchctl unload ~/Library/LaunchAgents/com.devonzot.addnew.plist
-   ```
+## Operating the service
+
+```bash
+# status
+launchctl list | grep devonzot
+
+# restart after a code change (reloads new code)
+launchctl kickstart -k gui/$(id -u)/com.devonzot.service
+
+# stop / unload
+launchctl bootout gui/$(id -u)/com.devonzot.service
+```
 
 ## Notes
 
-- Make sure `.env` is present and correctly configured before loading the job. The service reads credentials at startup.
-- DEVONthink 3 must be running when the launchd job fires. Consider using a `StartCalendarInterval` key so the job only runs during hours when DEVONthink is likely open, or pair it with a Login Item that opens DEVONthink at login.
-- The script runs in the mode specified in the plist `ProgramArguments` array (e.g., `--service` for perpetual polling or omit for the default streaming mode).
-- For troubleshooting, check `launchd_stdout.log`, `launchd_stderr.log`, and `service.log`, and verify plist syntax with:
-  ```
-  plutil -lint ~/Library/LaunchAgents/com.devonzot.addnew.plist
-  ```
+- DEVONthink 4 must be running (with its MCP server enabled) when the job fires.
+- The service waits `DEVONZOT_STARTUP_DELAY` seconds (default 120) before its first
+  cycle, then logs `DEVONthink control backend: MCP`.
+- Runtime output goes to `service.log` in the DEVONzot directory.
+- Verify plist syntax: `plutil -lint ~/Library/LaunchAgents/com.devonzot.service.plist`
 
 ---
 

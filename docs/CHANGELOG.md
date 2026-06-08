@@ -4,8 +4,16 @@ All notable changes to DEVONzot will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- DEVONthink 4 MCP backend: `src/devonthink_mcp.py` (token-auth JSON-RPC client) and a drop-in `DEVONthinkMCPInterface`, selected by the `DEVONZOT_USE_MCP` env flag. Replaces AppleScript control — `import_file` returns the new record's UUID directly, eliminating the copy-to-Inbox → wait → title-search dance and the macOS Automation (TCC) permission dependency that caused silent failures.
+- Automatic filing of imports by Zotero item type via MCP `move_record`: `manuscript`/`letter` → Research; `book`/`bookSection` → Books; everything else → Articles (Personal/Professional/Archived are never auto-touched). Mapping lives in `DEVONthinkMCPInterface.ITEM_TYPE_DATABASE`.
+
 ### Changed
+- DEVONthink control now targets **DEVONthink 4** (AppleScript app name `DEVONthink`); inbox path → `~/Library/Application Support/DEVONthink/Inbox`; running-process check → `DEVONthink.app`. DEVONthink 3 is no longer supported.
 - `retry_pending_deletes` now uses batch API calls (`get_items_by_keys`, `delete_items_batch`) instead of per-item sequential requests, reducing 414 stale pending deletes from ~15 minutes to ~18 seconds
+
+### Removed
+- Retired `devonzot_add_new.py` and its `com.devonzot.addnew` launchd job (the `--loop15` UUID-attachment batch), moved to `ARCHIVE/`. Its function — converting `linked_file` (ZotFile) symlinks into `x-devonthink-item://` links — is fully covered by the main service's Phase 1B + Phase 2, and it was finding zero new candidates every cycle. It was also the last AppleScript/TCC-dependent code path; the pipeline is now a single MCP-only service.
 
 ---
 
