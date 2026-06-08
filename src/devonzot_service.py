@@ -48,7 +48,7 @@ RATE_LIMIT_DELAY = float(os.environ.get("RATE_LIMIT_DELAY", 0.0))
 # Configuration
 ZOTERO_STORAGE_PATH = "/Users/travisross/Zotero/storage"
 ZOTFILE_IMPORT_PATH = "/Users/travisross/ZotFile Import"
-DEVONTHINK_INBOX_PATH = "/Users/travisross/Library/Application Support/DEVONthink 3/Inbox"
+DEVONTHINK_INBOX_PATH = "/Users/travisross/Library/Application Support/DEVONthink/Inbox"
 DEVONTHINK_DATABASE = "Professional"
 DEVONZOT_PATH = Path("/Users/travisross/DEVONzot")
 STATE_FILE = DEVONZOT_PATH / "service_state.json"
@@ -252,7 +252,7 @@ class DEVONthinkInterface:
             
             if result.returncode != 0:
                 error_msg = result.stderr.strip()
-                if "DEVONthink 3" in error_msg and "not running" in error_msg:
+                if "DEVONthink" in error_msg and "not running" in error_msg:
                     raise Exception("DEVONthink is not running")
                 elif "database" in error_msg.lower() and "not found" in error_msg.lower():
                     raise Exception(f"Database '{self.database_name}' not found")
@@ -270,7 +270,7 @@ class DEVONthinkInterface:
         """Check if DEVONthink is running"""
         try:
             result = subprocess.run(
-                ['pgrep', '-f', 'DEVONthink 3'],
+                ['pgrep', '-f', 'DEVONthink.app'],
                 capture_output=True, timeout=5
             )
             return result.returncode == 0
@@ -428,7 +428,7 @@ class DEVONthinkInterface:
         query = query.replace('"', '\\"').replace('\\', '\\\\')
 
         script = f'''
-        tell application "DEVONthink 3"
+        tell application "DEVONthink"
             try
                 tell database "{database_name}"
                     set searchResults to search "{query}"
@@ -499,7 +499,7 @@ class DEVONthinkInterface:
             tags_block = f"set tags of theRecord to {{{tags_applescript}}}"
 
         script = f'''
-        tell application "DEVONthink 3"
+        tell application "DEVONthink"
             try
                 set theRecord to get record with uuid "{uuid}"
 
@@ -558,7 +558,7 @@ class DEVONthinkInterface:
         safe_name = new_name.replace('"', '\\"').replace('\\', '\\\\')
 
         script = f'''
-        tell application "DEVONthink 3"
+        tell application "DEVONthink"
             try
                 set theRecord to get record with uuid "{uuid}"
                 set name of theRecord to "{safe_name}"

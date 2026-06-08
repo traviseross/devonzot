@@ -69,7 +69,7 @@ class DEVONthinkAPIInterface:
                 search_clean = search_term.replace('"', '\\"')
                 
                 script = f'''
-                tell application "DEVONthink 3"
+                tell application "DEVONthink"
                     set searchResults to search "{search_clean}"
                     if (count of searchResults) > 0 then
                         set firstResult to item 1 of searchResults
