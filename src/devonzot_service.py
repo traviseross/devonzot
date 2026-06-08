@@ -599,6 +599,16 @@ class DEVONthinkMCPInterface:
                   'had', 'was', 'are', 'were', 'been', 'will', 'can', 'may', 'did',
                   'does', 'have', 'after', 'before', 'about', 'into', 'over', 'also'}
 
+    # Zotero item type -> destination database. Anything not listed -> DEFAULT_FILE_DATABASE.
+    # (Personal / Professional / Archived are never auto-filed.)
+    ITEM_TYPE_DATABASE = {
+        "manuscript": "Research",
+        "letter": "Research",
+        "book": "Books",
+        "bookSection": "Books",
+    }
+    DEFAULT_FILE_DATABASE = "Articles"
+
     def __init__(self, database_name: str = "Professional"):
         self.database_name = database_name
         self.mcp = DevonthinkMCP()
@@ -692,6 +702,21 @@ class DEVONthinkMCPInterface:
             out[f] = await self.find_item_by_filename_after_wait_async(f, dry_run)
         return out
 
+    def _file_by_item_type(self, uuid: str, item_type: Optional[str]) -> None:
+        """Move an imported record out of the Global Inbox into its database by item type."""
+        target = self.ITEM_TYPE_DATABASE.get(item_type, self.DEFAULT_FILE_DATABASE)
+        if not target or target == DEVONTHINK_GLOBAL_INBOX:
+            return
+        try:
+            root = self.mcp.database_root_uuid(target)
+            if not root:
+                logger.warning(f"File-by-type: database '{target}' not found; left in Global Inbox")
+                return
+            self.mcp.move_record(uuid, destination=root)
+            logger.info(f"Filed {uuid} -> {target} (item type: {item_type or 'unknown'})")
+        except DevonthinkMCPError as e:
+            logger.warning(f"File-by-type move failed for {uuid} ({item_type} -> {target}): {e}")
+
     def update_item_metadata(self, uuid: str, item: "ZoteroItem", dry_run=False) -> bool:
         if dry_run:
             logger.info(f"[DRY RUN] Would update metadata for UUID: {uuid}")
@@ -721,6 +746,7 @@ class DEVONthinkMCPInterface:
 
         try:
             self.mcp.update_record(uuid, comment=comment, tags=tags or None)
+            self._file_by_item_type(uuid, item.item_type)
             logger.info(f"Updated metadata for DEVONthink item: {uuid}")
             return True
         except DevonthinkMCPError as e:

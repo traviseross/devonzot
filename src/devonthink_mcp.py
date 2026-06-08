@@ -128,13 +128,20 @@ class DevonthinkMCP:
         result = self._tool("get_databases")
         return result if isinstance(result, list) else result.get("databases", result)
 
+    def _databases_by_name(self):
+        if self._db_uuid_cache is None:
+            self._db_uuid_cache = {db.get("name"): db for db in self.get_databases()}
+        return self._db_uuid_cache
+
     def database_uuid(self, name):
         """Resolve a database name to its UUID (cached)."""
-        if self._db_uuid_cache is None:
-            self._db_uuid_cache = {
-                db.get("name"): db.get("uuid") for db in self.get_databases()
-            }
-        return self._db_uuid_cache.get(name)
+        db = self._databases_by_name().get(name)
+        return db.get("uuid") if db else None
+
+    def database_root_uuid(self, name):
+        """Resolve a database name to its root group UUID (a move destination)."""
+        db = self._databases_by_name().get(name)
+        return db.get("rootUUID") if db else None
 
     def import_file(self, path, database_uuid=None, destination=None, mode=None):
         """Import a file into DEVONthink. Returns the new record dict (incl. 'uuid')."""
@@ -176,6 +183,17 @@ class DevonthinkMCP:
 
     def get_record_properties(self, uuid):
         return self._tool("get_record_properties", {"uuid": uuid})
+
+    def move_record(self, uuid, destination, database_uuid=None):
+        """Move record(s) to a destination group (UUID or location path)."""
+        args = {"destination": destination}
+        if isinstance(uuid, (list, tuple)):
+            args["uuids"] = list(uuid)
+        else:
+            args["uuid"] = uuid
+        if database_uuid:
+            args["database_uuid"] = database_uuid
+        return self._tool("move_record", args)
 
     def trash_record(self, uuids):
         if isinstance(uuids, str):
