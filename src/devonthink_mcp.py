@@ -199,3 +199,30 @@ class DevonthinkMCP:
         if isinstance(uuids, str):
             uuids = [uuids]
         return self._tool("trash_record", {"uuids": uuids})
+
+    def extract_record_content(self, uuid: str, max_chars: int = 4000) -> str:
+        """Extract textual content from a record for AI consumption.
+
+        Works for PDFs (including scanned/OCR'd), HTML, RTF, Markdown.
+        Returns pages joined by newlines, truncated to max_chars.
+        Use this instead of get_record_text for PDFs — get_record_text only
+        works for plain-text records (RTF, Markdown, plain text).
+        """
+        result = self._tool("extract_record_content", {"uuid": uuid})
+        if isinstance(result, list):
+            parts = [p.get("text", "") for p in result if isinstance(p, dict)]
+            return "\n".join(parts)[:max_chars]
+        if isinstance(result, str):
+            return result[:max_chars]
+        return ""
+
+    def classify_record(self, uuid: str) -> list:
+        """Suggest destination groups via DT4's built-in AI, ordered by score.
+
+        Each suggestion: {"uuid": "…", "databaseUUID": "…", "name": "…", "score": 0.87}
+        Returns [] when DT4 has no suggestion (sparse library for this doc type).
+        """
+        result = self._tool("classify_record", {"uuid": uuid})
+        if isinstance(result, list):
+            return result
+        return []
