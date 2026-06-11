@@ -2554,8 +2554,9 @@ class DEVONzotService:
         results = {'success': 0, 'error': 0, 'skipped': 0}
 
         # Get items modified since last library version
+        v = self.state.last_library_version
         items = self.zotero_api.get_items_needing_sync(
-            self.state.last_library_version,
+            (v - 1) if v else None,
             processed_items=self.state.processed_items
         )
 
@@ -2725,7 +2726,10 @@ class DEVONzotService:
         Returns:
             True if sync completed successfully.
         """
-        since_version = self.state.last_library_version or 0
+        # Use V-1 so items at exactly last_library_version aren't excluded by
+        # Zotero's exclusive ?since=V semantics (returns items with version > V).
+        v = self.state.last_library_version
+        since_version = (v - 1) if v else 0
         logger.info(
             f"Running incremental sync (since version {since_version}, "
             f"triggered by version {triggered_version})"
@@ -3153,7 +3157,10 @@ class DEVONzotService:
             async def run_deferred_migrations():
                 try:
                     logger.info("Startup Tier 2 (background): Phase 1A → 1B → 2 → 3")
-                    since = self.state.last_library_version or 0
+                    # Use V-1 so items at exactly last_library_version aren't
+                    # excluded by Zotero's exclusive ?since=V (returns V+1, V+2…).
+                    v = self.state.last_library_version
+                    since = (v - 1) if v else 0
 
                     if since > 0:
                         # Incremental path: one version check + one batch fetch
