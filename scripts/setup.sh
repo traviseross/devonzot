@@ -25,11 +25,17 @@ done
 # ── 1. Find best available Python ────────────────────────────────────────────
 
 PYTHON=""
-for candidate in python3.13 python3.12 python3.14 python3; do
-    if command -v "$candidate" &>/dev/null; then
-        ver=$("$candidate" -c 'import sys; print(sys.version_info[:2])')
-        if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
-            PYTHON=$(command -v "$candidate")
+# Check both by name (interactive shells) and by full path (SSH/non-login shells)
+PYTHON_CANDIDATES=(
+    python3.13 python3.12 python3.14 python3
+    /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12 /opt/homebrew/bin/python3.14
+    /usr/local/bin/python3.13 /usr/local/bin/python3.12 /usr/local/bin/python3.14
+)
+for candidate in "${PYTHON_CANDIDATES[@]}"; do
+    if [[ -x "$candidate" ]] || command -v "$candidate" &>/dev/null; then
+        full=$(command -v "$candidate" 2>/dev/null || echo "$candidate")
+        if "$full" -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
+            PYTHON="$full"
             break
         fi
     fi
