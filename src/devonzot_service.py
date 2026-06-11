@@ -1590,14 +1590,21 @@ class DEVONzotService:
         remaining = []
         results['retried'] = n
 
+        # Batch-check existence in a single API call instead of N serial calls
+        all_keys = [p['key'] for p in self.state.pending_downloads]
+        existing_items = {
+            item['data']['key']: item
+            for item in self.zotero_api.get_items_by_keys(all_keys)
+            if 'data' in item
+        }
+
         for pending in self.state.pending_downloads:
             key = pending['key']
             filename = pending['filename']
             retry_count = pending.get('retry_count', 0)
 
             # Check if attachment still exists in Zotero
-            att_item = self.zotero_api.get_item_raw(key)
-            if att_item is None:
+            if key not in existing_items:
                 logger.info(f"Pending download {key}: attachment no longer exists — removed from queue")
                 continue
 
@@ -2268,7 +2275,10 @@ class DEVONzotService:
 
         return result
 
-    def migrate_zotfile_attachments(self, dry_run=False, interactive=False) -> Dict[str, int]:
+    def migrate_zotfile_attachments(
+        self, dry_run=False, interactive=False,
+        attachments: Optional[List[ZoteroAttachment]] = None
+    ) -> Dict[str, int]:
         """Migrate ZotFile-managed linked files (linkMode=2) to DEVONthink
 
         This handles files stored in ZotFile Import or other locations that are
@@ -2290,7 +2300,8 @@ class DEVONzotService:
         }
         skipped_details = []
 
-        attachments = self.zotero_api.get_zotfile_symlinks()
+        if attachments is None:
+            attachments = self.zotero_api.get_zotfile_symlinks()
         logger.info(f"📊 Detection Summary: Found {len(attachments)} ZotFile linked attachments (linkMode=2)")
 
         for attachment in attachments:
@@ -2374,13 +2385,18 @@ class DEVONzotService:
 
         return results
 
-    async def convert_zotfile_symlinks_async(self, dry_run=False, batch_size=20, interactive=False) -> Dict[str, int]:
+    async def convert_zotfile_symlinks_async(
+        self, dry_run=False, batch_size=20, interactive=False,
+        attachments: Optional[List[ZoteroAttachment]] = None
+    ) -> Dict[str, int]:
         """Convert ZotFile symlinks to DEVONthink UUID links using async batch processing"""
         logger.info("🔗 Converting ZotFile symlinks with async processing...")
 
         results = {'success': 0, 'error': 0, 'skipped': 0}
 
-        symlinks = self.zotero_api.get_zotfile_symlinks()
+        if attachments is None:
+            attachments = self.zotero_api.get_zotfile_symlinks()
+        symlinks = attachments
         logger.info(f"Found {len(symlinks)} ZotFile symlinks to convert")
 
         if not symlinks:
@@ -2817,7 +2833,6 @@ class DEVONzotService:
             # Step 3b: Process any new stored (linkMode=0) attachments
             if has_stored_imports and not dry_run:
                 logger.info("New imported_file attachment(s) detected — running Phase 1A migration...")
-                self.zotero_api.invalidate_caches()
                 # Use targeted list when we know exactly which items changed.
                 # Fall back to full scan if pending_downloads recovery also fired
                 # (those items aren't in stored_import_items).
@@ -2826,6 +2841,8 @@ class DEVONzotService:
                     else [self.zotero_api._api_item_to_zotero_attachment(item)
                           for item in stored_import_items] or None
                 )
+                if targeted is None:
+                    self.zotero_api.invalidate_caches()
                 phase1a_results = self.migrate_stored_attachments(dry_run=False, attachments=targeted)
                 processed_count += phase1a_results.get('success', 0)
                 error_count += phase1a_results.get('error', 0)
@@ -2848,7 +2865,6 @@ class DEVONzotService:
                                 f"Version drift detected ({since_version} → {post_phase1a_version}) "
                                 f"— re-running Phase 1A for items that arrived during fetch"
                             )
-                            self.zotero_api.invalidate_caches()
                             gap_targeted = [self.zotero_api._api_item_to_zotero_attachment(item)
                                             for item in gap_import_items]
                             gap_results = self.migrate_stored_attachments(dry_run=False, attachments=gap_targeted)
@@ -3137,23 +3153,63 @@ class DEVONzotService:
             async def run_deferred_migrations():
                 try:
                     logger.info("Startup Tier 2 (background): Phase 1A → 1B → 2 → 3")
+                    since = self.state.last_library_version or 0
+
+                    if since > 0:
+                        # Incremental path: one version check + one batch fetch
+                        changed_keys = self.zotero_api.get_changed_item_versions(
+                            since, item_type='attachment'
+                        )
+                        if changed_keys:
+                            changed_items = self.zotero_api.get_items_by_keys(
+                                list(changed_keys.keys())
+                            )
+                        else:
+                            changed_items = []
+                        stored_items = [
+                            self.zotero_api._api_item_to_zotero_attachment(item)
+                            for item in changed_items
+                            if item.get('data', {}).get('linkMode') == 'imported_file'
+                        ]
+                        linked_items = [
+                            self.zotero_api._api_item_to_zotero_attachment(item)
+                            for item in changed_items
+                            if item.get('data', {}).get('linkMode') == 'linked_file'
+                        ]
+                        logger.info(
+                            f"Tier 2 incremental: {len(stored_items)} stored, "
+                            f"{len(linked_items)} linked attachments since v{since}"
+                        )
+                    else:
+                        # First run: full scan
+                        stored_items = None
+                        linked_items = None
 
                     await self._wait_if_paused_async()
-                    logger.info("PHASE 1A: Migrating linkMode=0 (Zotero storage) attachments")
-                    m1a = self.migrate_stored_attachments(dry_run=False)
-                    logger.info(f"Phase 1A complete: {m1a}")
+                    if stored_items is None or stored_items:
+                        logger.info("PHASE 1A: Migrating linkMode=0 (Zotero storage) attachments")
+                        m1a = self.migrate_stored_attachments(dry_run=False, attachments=stored_items)
+                        logger.info(f"Phase 1A complete: {m1a}")
+                    else:
+                        logger.info("PHASE 1A: skipped — no new stored attachments since last run")
 
                     await self._wait_if_paused_async()
-                    logger.info("PHASE 1B: Migrating linkMode=2 (ZotFile Import) attachments")
-                    m1b = self.migrate_zotfile_attachments(dry_run=False)
-                    logger.info(f"Phase 1B complete: {m1b}")
+                    if linked_items is None or linked_items:
+                        logger.info("PHASE 1B: Migrating linkMode=2 (ZotFile Import) attachments")
+                        m1b = self.migrate_zotfile_attachments(dry_run=False, attachments=linked_items)
+                        logger.info(f"Phase 1B complete: {m1b}")
+                    else:
+                        logger.info("PHASE 1B: skipped — no new ZotFile attachments since last run")
 
                     await self._wait_if_paused_async()
-                    logger.info("PHASE 2: Converting existing ZotFile symlinks to UUID links")
-                    conv = await self.convert_zotfile_symlinks_async(
-                        dry_run=False, batch_size=50
-                    )
-                    logger.info(f"Phase 2 complete: {conv}")
+                    if linked_items is None or linked_items:
+                        logger.info("PHASE 2: Converting existing ZotFile symlinks to UUID links")
+                        conv = await self.convert_zotfile_symlinks_async(
+                            dry_run=False, batch_size=50, attachments=linked_items
+                        )
+                        logger.info(f"Phase 2 complete: {conv}")
+                    else:
+                        logger.info("PHASE 2: skipped — no new ZotFile attachments since last run")
 
                     await self._wait_if_paused_async()
                     logger.info("PHASE 3: Syncing new items")
