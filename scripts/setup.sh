@@ -52,8 +52,8 @@ echo "Using Python: $PYTHON ($($PYTHON --version))"
 
 echo "Rebuilding venv..."
 "$PYTHON" -m venv "$REPO/venv" --clear
-"$REPO/venv/bin/pip" install --quiet --upgrade pip
-"$REPO/venv/bin/pip" install --quiet -r "$REPO/src/requirements.txt"
+"$REPO/venv/bin/python" -m pip install --quiet --upgrade pip
+"$REPO/venv/bin/python" -m pip install --quiet -r "$REPO/src/requirements.txt"
 echo "Venv ready: $REPO/venv"
 
 # ── 3. Remove retired com.devonzot.addnew plist if present ──────────────────
