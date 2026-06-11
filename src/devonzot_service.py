@@ -1634,7 +1634,10 @@ class DEVONzotService:
         )
         return results
 
-    def migrate_stored_attachments(self, dry_run=False, interactive=False) -> Dict[str, int]:
+    def migrate_stored_attachments(
+        self, dry_run=False, interactive=False,
+        attachments: Optional[List[ZoteroAttachment]] = None
+    ) -> Dict[str, int]:
         """Migrate Zotero stored files to DEVONthink with comprehensive tracking"""
         logger.info("📁 Starting migration of stored attachments...")
 
@@ -1658,7 +1661,8 @@ class DEVONzotService:
 
         skipped_details = []  # Track details for reporting
 
-        attachments = self.zotero_api.get_stored_attachments()
+        if attachments is None:
+            attachments = self.zotero_api.get_stored_attachments()
         logger.info(f"📊 Detection Summary: Found {len(attachments)} stored attachments (linkMode=0)")
 
         for attachment in attachments:
@@ -2740,6 +2744,8 @@ class DEVONzotService:
             skipped_count = 0
             error_count = 0
             has_stored_imports = False
+            stored_import_items: List[Dict] = []
+            pending_downloads_triggered = False
 
             for api_item in changed_items:
                 data = api_item.get('data', {})
@@ -2799,18 +2805,28 @@ class DEVONzotService:
                         logger.info(f"[DRY RUN] Would delete imported_url: {attachment.key}")
                 elif link_mode == 'imported_file':
                     has_stored_imports = True
+                    stored_import_items.append(api_item)
 
             # Retry pending downloads — if any succeed, trigger Phase 1A
             if self.state.pending_downloads and not dry_run:
                 pending_dl_results = self.retry_pending_downloads(dry_run)
                 if pending_dl_results.get('downloaded', 0) > 0:
                     has_stored_imports = True
+                    pending_downloads_triggered = True
 
             # Step 3b: Process any new stored (linkMode=0) attachments
             if has_stored_imports and not dry_run:
                 logger.info("New imported_file attachment(s) detected — running Phase 1A migration...")
                 self.zotero_api.invalidate_caches()
-                phase1a_results = self.migrate_stored_attachments(dry_run=False)
+                # Use targeted list when we know exactly which items changed.
+                # Fall back to full scan if pending_downloads recovery also fired
+                # (those items aren't in stored_import_items).
+                targeted = (
+                    None if pending_downloads_triggered
+                    else [self.zotero_api._api_item_to_zotero_attachment(item)
+                          for item in stored_import_items] or None
+                )
+                phase1a_results = self.migrate_stored_attachments(dry_run=False, attachments=targeted)
                 processed_count += phase1a_results.get('success', 0)
                 error_count += phase1a_results.get('error', 0)
                 skipped_count += phase1a_results.get('skipped', 0)
@@ -2822,18 +2838,20 @@ class DEVONzotService:
                         since_version, item_type='attachment'
                     )
                     if gap_keys:
-                        new_imports = any(
-                            (api_item := self.zotero_api.get_item_raw(key)) and
-                            api_item.get('data', {}).get('linkMode') == 'imported_file'
-                            for key in gap_keys
-                        )
-                        if new_imports:
+                        gap_items = self.zotero_api.get_items_by_keys(list(gap_keys.keys()))
+                        gap_import_items = [
+                            item for item in gap_items
+                            if item.get('data', {}).get('linkMode') == 'imported_file'
+                        ]
+                        if gap_import_items:
                             logger.info(
                                 f"Version drift detected ({since_version} → {post_phase1a_version}) "
                                 f"— re-running Phase 1A for items that arrived during fetch"
                             )
                             self.zotero_api.invalidate_caches()
-                            gap_results = self.migrate_stored_attachments(dry_run=False)
+                            gap_targeted = [self.zotero_api._api_item_to_zotero_attachment(item)
+                                            for item in gap_import_items]
+                            gap_results = self.migrate_stored_attachments(dry_run=False, attachments=gap_targeted)
                             processed_count += gap_results.get('success', 0)
                             error_count += gap_results.get('error', 0)
 
