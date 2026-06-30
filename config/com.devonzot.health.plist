@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.devonzot.health</string>
+    <!-- Root LaunchDaemon (system domain), NOT a gui/501 LaunchAgent, so it keeps
+         emitting `gui_session_active:false` after uid 501 logs out instead of
+         silently going stale. Absolute paths: as root, $HOME is /var/root. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/travisross/DEVONzot/venv/bin/python</string>
+        <string>/Users/travisross/DEVONzot/src/health_emitter.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/travisross/DEVONzot</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>60</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/Shared/devonzot/health_emitter.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/Shared/devonzot/health_emitter.log</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>

@@ -22,6 +22,17 @@ for arg in "$@"; do
     esac
 done
 
+# Never run this whole script as root. As root the venv would be rebuilt with
+# root-owned files, and `gui/$(id -u)` resolves to gui/0 — the service agent must
+# load into the *user's* GUI domain (gui/501), not root's. The --deploy block
+# sudo's only the specific health-daemon steps that genuinely need it.
+if [[ $EUID -eq 0 ]]; then
+    echo "ERROR: do not run this script with sudo / as root."
+    echo "Run it as your normal user:  ./scripts/setup.sh --deploy"
+    echo "It will prompt for sudo only for the root health-daemon install."
+    exit 1
+fi
+
 # ── 1. Find best available Python ────────────────────────────────────────────
 
 PYTHON=""
@@ -77,13 +88,39 @@ if [[ "$DEPLOY" == true ]]; then
     sed "s|__HOME__|$HOME|g" "$PLIST_SRC" > "$PLIST_DEST"
     plutil -lint "$PLIST_DEST"
 
-    # Unload any previous version first
+    # Unload any previous version first. A bootstrap immediately after a bootout
+    # can transiently fail with "5: Input/output error" while launchd finishes
+    # tearing down the old (KeepAlive) job — so settle, then retry once. Don't let
+    # a service hiccup abort the script before the health-daemon install below.
     launchctl bootout "gui/$(id -u)/com.devonzot.service" 2>/dev/null || true
-
-    launchctl bootstrap "gui/$(id -u)" "$PLIST_DEST"
+    sleep 1
+    if ! launchctl bootstrap "gui/$(id -u)" "$PLIST_DEST" 2>/dev/null; then
+        sleep 2
+        launchctl bootstrap "gui/$(id -u)" "$PLIST_DEST" \
+            || echo "WARNING: service bootstrap failed; continuing to health daemon."
+    fi
     echo "Service started: com.devonzot.service"
     echo ""
     launchctl list | grep devonzot || true
+
+    # ── Health emitter (root LaunchDaemon) ───────────────────────────────────
+    # Writes /Users/Shared/devonzot/health.json every 60s; the ross-server fleet
+    # monitor pulls it over SSH. Root (system domain) so it survives logout and
+    # keeps reporting gui_session_active:false. Needs sudo for /Library and
+    # /Users/Shared. No __HOME__ substitution — the plist uses absolute paths.
+    HEALTH_SRC="$REPO/config/com.devonzot.health.plist"
+    HEALTH_DEST="/Library/LaunchDaemons/com.devonzot.health.plist"
+
+    echo ""
+    echo "Installing health emitter daemon (requires sudo)..."
+    plutil -lint "$HEALTH_SRC"
+    sudo install -m 644 -o root -g wheel "$HEALTH_SRC" "$HEALTH_DEST"
+    sudo mkdir -p /Users/Shared/devonzot && sudo chmod 755 /Users/Shared/devonzot
+    sudo launchctl bootout system/com.devonzot.health 2>/dev/null || true
+    sudo launchctl bootstrap system "$HEALTH_DEST"
+    echo "Health emitter started: com.devonzot.health"
+    echo "Once it's writing /Users/Shared/devonzot/health.json, ping the HA team"
+    echo "to re-enable the devonzot: block in fleet.yaml."
 else
     echo ""
     echo "Venv rebuilt. Service NOT installed (dev machine mode)."
