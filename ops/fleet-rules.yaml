@@ -1,0 +1,72 @@
+# DEVONzot — fleet-monitor rules (owned by the DEVONzot team)
+#
+# The ross-server fleet monitor pulls /Users/Shared/devonzot/health.json over ssh
+# (via: ssh, host: iMac) every ~15s and evaluates these rules against the snapshot
+# body. Hand this block to the HA team to merge under `services:` in fleet.yaml;
+# they restart fleet-monitor and it replaces the conservative starter they wrote.
+#
+# Emitter:  src/health_emitter.py        (fields it publishes)
+# Daemon:   config/com.devonzot.health.plist
+# See also: docs/INSTALL_LAUNCHD.md
+#
+# Design notes:
+#  - Everything is never-page (tier 2 digest / tier 3 info), matching HA's stance.
+#    Bump mcp_reachable to tier 1 if you ever want a real-time page for it.
+#  - `when_field`/`when_equals` gates keep a single logout from triple-firing
+#    (gui + mcp + stalled). If the ssh-path engine doesn't support gates, drop the
+#    two `when_*` lines — the rules still work, just noisier on a logout.
+
+devonzot:
+  health:
+    via: ssh
+    host: iMac
+    path: /Users/Shared/devonzot/health.json
+    # Emitter ticks every 60s and the iMac is always-on (DEVONzot can't sync while
+    # it sleeps anyway), so >5m stale == genuinely not reporting. Keep at 300.
+    max_stale_s: 300
+
+  rules:
+    # ── sync fully stopped (root-cause signals) ───────────────────────────────
+    - { field: gui_session_active, equals: false, sustained_s: 900,
+        severity: warning, tier: 2,
+        reason: "DEVONzot: uid-501 logged out on the iMac — DEVONthink down, sync stopped; log back in" }
+
+    - { field: service_process_alive, equals: false, sustained_s: 300,
+        severity: warning, tier: 2,
+        reason: "DEVONzot: launchd service process dead — Zotero<->DEVONthink sync stopped" }
+
+    # ── degraded while still running (what 'the process is up' can't see) ──────
+    # THE signal from the 2026-06-29 incident: DEVONthink's HTTP MCP server on :8420
+    # was toggled off (enabling the Claude Code stdio interface disables it), so
+    # imports failed silently for ~6 days. Gated on a live GUI session so a logout
+    # (which also drops MCP) fires the gui rule above, not this one.
+    - { field: mcp_reachable, equals: false, sustained_s: 900,
+        when_field: gui_session_active, when_equals: true,
+        severity: warning, tier: 2,
+        reason: "DEVONzot: DEVONthink MCP unreachable on :8420 while logged in — re-enable Settings>AI>MCP (HTTP server)" }
+
+    - { field: status, not_equals: ok, sustained_s: 600,
+        severity: warning, tier: 2,
+        reason: "DEVONzot self-reports status != ok (a service cycle failed; restart_count > 0)" }
+
+    # ── sync loop wedged though everything looks alive ────────────────────────
+    # last_sync is written at the end of every completed cycle, and the fallback
+    # poll runs one at least every 600s, so a healthy seconds_since_sync stays
+    # under ~800s. >30m with MCP reachable means the event loop / fallback poll is
+    # stuck — a stall service_process_alive can't catch. Gated on mcp_reachable so
+    # the mcp rule owns the MCP-down case instead of double-firing.
+    - { field: seconds_since_sync, above: 1800, sustained_s: 600,
+        when_field: mcp_reachable, when_equals: true,
+        severity: warning, tier: 3,
+        reason: "DEVONzot: no completed sync cycle in >30m despite MCP reachable — sync loop may be stalled" }
+
+    # ── stuck retry queues (secondary; catches non-MCP stalls) ────────────────
+    # Normal steady state is 0; items drop after 20 retries, so a sustained backlog
+    # is abnormal. 25 tolerates a legitimate migration burst.
+    - { field: pending_downloads, above: 25, sustained_s: 3600,
+        severity: warning, tier: 3,
+        reason: "DEVONzot: download retry queue > 25 for >1h — attachments not landing in DEVONthink" }
+
+    - { field: pending_deletes, above: 25, sustained_s: 3600,
+        severity: warning, tier: 3,
+        reason: "DEVONzot: delete retry queue > 25 for >1h — Zotero deletions not completing" }
