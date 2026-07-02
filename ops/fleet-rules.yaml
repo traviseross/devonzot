@@ -50,15 +50,17 @@ devonzot:
         reason: "DEVONzot self-reports status != ok (a service cycle failed; restart_count > 0)" }
 
     # ── sync loop wedged though everything looks alive ────────────────────────
-    # last_sync is written at the end of every completed cycle, and the fallback
-    # poll runs one at least every 600s, so a healthy seconds_since_sync stays
-    # under ~800s. >30m with MCP reachable means the event loop / fallback poll is
-    # stuck — a stall service_process_alive can't catch. Gated on mcp_reachable so
-    # the mcp rule owns the MCP-down case instead of double-firing.
+    # seconds_since_sync tracks the poll HEARTBEAT (service_state.last_zotero_check),
+    # which advances on every completed poll — including no-op "no changes" polls —
+    # so a QUIET library (no Zotero traffic, normal overnight) stays fresh regardless
+    # of traffic. The fallback poll runs at least every 600s, so healthy stays under
+    # ~650s. >30m with MCP reachable means the poll loop has actually stopped or
+    # Zotero is unreachable — a stall service_process_alive can't catch. Gated on
+    # mcp_reachable so the mcp rule owns the MCP-down case instead of double-firing.
     - { field: seconds_since_sync, above: 1800, sustained_s: 600,
         when_field: mcp_reachable, when_equals: true,
         severity: warning, tier: 3,
-        reason: "DEVONzot: no completed sync cycle in >30m despite MCP reachable — sync loop may be stalled" }
+        reason: "DEVONzot: no completed sync poll in >30m despite MCP reachable — poll loop stalled or Zotero unreachable" }
 
     # ── stuck retry queues (secondary; catches non-MCP stalls) ────────────────
     # Normal steady state is 0; items drop after 20 retries, so a sustained backlog

@@ -83,13 +83,15 @@ def _load_state() -> dict:
 
 
 def _seconds_since_sync(state: dict):
-    """now - last_sync. `last_sync` is naive *local* time (the service writes
-    datetime.now().isoformat()), so compare against a local naive now."""
-    last_sync = state.get('last_sync')
-    if not last_sync:
+    """Seconds since the sync loop last *completed a poll* (not since the last
+    applied change). Prefer the poll heartbeat `last_zotero_check`, which advances
+    on every completed poll incl. no-ops, so a quiet library stays fresh; fall back
+    to `last_sync` for pre-heartbeat state files. Both are naive *local* time (the
+    service writes datetime.now().isoformat()), so compare against a local now."""
+    ts = state.get('last_zotero_check') or state.get('last_sync')
+    if not ts:
         return None
-    dt = datetime.fromisoformat(last_sync)
-    return int((datetime.now() - dt).total_seconds())
+    return int((datetime.now() - datetime.fromisoformat(ts)).total_seconds())
 
 
 def _probe(fn, default):

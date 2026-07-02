@@ -181,8 +181,11 @@ def mock_service(tmp_path):
     @dataclass
     class MockState:
         last_sync: Optional[str] = None
+        last_zotero_check: Optional[str] = None
         last_library_version: Optional[int] = 50
         processed_items: List[str] = field(default_factory=list)
+        pending_downloads: List[Dict[str, Any]] = field(default_factory=list)
+        pending_deletes: List[Dict[str, Any]] = field(default_factory=list)
 
     service.state = MockState()
     service._save_state = Mock()
@@ -342,6 +345,37 @@ class TestRunIncrementalSyncAsync:
         assert 'DEL1' not in mock_service.state.processed_items
         assert 'KEEP1' in mock_service.state.processed_items
         assert 'KEEP2' in mock_service.state.processed_items
+
+    async def test_no_op_poll_advances_heartbeat(self, mock_service):
+        """A no-change poll still advances last_zotero_check (and persists), so a
+        quiet library doesn't read as stalled. last_sync must NOT move — it tracks
+        the last *applied* change, not liveness."""
+        mock_service.state.last_zotero_check = None
+        mock_service.state.last_sync = None
+        mock_service.zotero_api.get_changed_item_versions = Mock(return_value={})
+        mock_service.zotero_api.last_library_version = 55
+
+        from devonzot_service import DEVONzotService
+        result = await DEVONzotService.run_incremental_sync_async(mock_service)
+
+        assert result is True
+        assert mock_service.state.last_zotero_check is not None  # heartbeat advanced
+        assert mock_service.state.last_sync is None              # no applied change
+        mock_service._save_state.assert_called()
+
+    async def test_no_op_dry_run_does_not_stamp_heartbeat(self, mock_service):
+        """Dry run must not mutate/persist the heartbeat."""
+        mock_service.state.last_zotero_check = None
+        mock_service.zotero_api.get_changed_item_versions = Mock(return_value={})
+
+        from devonzot_service import DEVONzotService
+        result = await DEVONzotService.run_incremental_sync_async(
+            mock_service, dry_run=True
+        )
+
+        assert result is True
+        assert mock_service.state.last_zotero_check is None
+        mock_service._save_state.assert_not_called()
 
     async def test_dry_run_does_not_save_state(self, mock_service):
         """Dry run mode does not persist state changes."""

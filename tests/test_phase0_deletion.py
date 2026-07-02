@@ -104,8 +104,14 @@ def service_with_mocks(mock_env, mock_zotero_client, mock_devonthink, tmp_path, 
         service = DEVONzotService()
         service.zotero_api = mock_zotero_client
         service.devonthink = mock_devonthink
-        
-        return service
+
+        # MUST yield (not return): a fixture that returns from inside the `with`
+        # tears down these patches BEFORE the test runs, so STATE_FILE reverts to
+        # the real production service_state.json and any _save_state() in the test
+        # body overwrites it with fresh (empty) state. yield keeps the patches
+        # active for the whole test. (Regression: running the suite on the iMac
+        # wiped production state on 2026-07-02.)
+        yield service
 
 
 @pytest.fixture

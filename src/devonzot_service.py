@@ -2743,12 +2743,19 @@ class DEVONzotService:
                 since_version, item_type='attachment'
             )
 
+            # Poll heartbeat: a successful version check proves the loop is alive and
+            # Zotero is reachable, even when nothing changed. Advance it on every
+            # completed poll so a quiet library (no traffic) doesn't read as stalled.
+            # Distinct from last_sync, which tracks the last *applied* change.
+            if not dry_run:
+                self.state.last_zotero_check = datetime.now().isoformat()
+
             if not changed_keys:
                 logger.info("No changed attachments since last sync")
                 if self.zotero_api.last_library_version:
                     self.state.last_library_version = self.zotero_api.last_library_version
-                    if not dry_run:
-                        self._save_state()
+                if not dry_run:
+                    self._save_state()
                 return True
 
             logger.info(
@@ -3023,7 +3030,9 @@ class DEVONzotService:
 
             # Update state
             if not dry_run:
-                self.state.last_sync = datetime.now().isoformat()
+                now_iso = datetime.now().isoformat()
+                self.state.last_sync = now_iso
+                self.state.last_zotero_check = now_iso  # heartbeat (polling-mode path)
                 self.state.last_library_version = self.zotero_api.last_library_version
                 self._save_state()
 
