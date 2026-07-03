@@ -21,7 +21,9 @@ from dotenv import load_dotenv
 from cleanup_service import TempFileManager
 from combine_article_extracts import combine_articles
 from zotero_api_client import ZoteroAPIClient
-from devonzot_service import DEVONthinkInterface, FilenameGenerator
+from devonzot_service import DEVONthinkInterface, FilenameGenerator, DEVONZOT_PATH
+from devonthink_mcp import DevonthinkMCP
+from content_dedup import ContentDedup, sha256_of_file
 from exceptions import (
     ArticleExtractionError,
     DEVONthinkIntegrationError,
@@ -206,6 +208,9 @@ async def run_pipeline(url: str, dry_run: bool = False):
         zot_kwargs['translation_timeout'] = TRANSLATION_TIMEOUT
     zot = ZoteroAPIClient(ZOTERO_API_KEY, ZOTERO_USER_ID, **zot_kwargs)
     dt = DEVONthinkInterface()
+    # Content-dedup gate (observe-only unless DEDUP_GATE_MODE=live). The pipeline's
+    # DEVONthinkInterface is AppleScript-only, so give the gate its own MCP client.
+    dedup = ContentDedup(DevonthinkMCP(), DEVONZOT_PATH / "content_sha_index.json")
 
     # Step 1: Create Zotero item (with translation server metadata)
     logger.info("Step 1/5: Creating Zotero item from URL")
@@ -388,6 +393,10 @@ async def run_pipeline(url: str, dry_run: bool = False):
                     operation="find_uuid"
                 )
             logger.info(f"Found DEVONthink UUID: {uuid}")
+            # Content-dedup safety net (post-import): observe/adopt DT content duplicates
+            # of the freshly imported markdown. Skip the pipeline's fake dry-run UUID.
+            if not dry_run:
+                uuid = dedup.reconcile_after_import(uuid, sha256_of_file(tmp_file), dry_run=False)
         except Exception as e:
             logger.error(f"Failed to find DEVONthink item: {e}")
             raise DEVONthinkIntegrationError(f"UUID lookup failed: {e}", operation="find_uuid") from e
