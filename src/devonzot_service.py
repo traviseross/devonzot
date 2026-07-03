@@ -35,6 +35,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 from zotero_api_client import ZoteroAPIClient
 from devonthink_mcp import DevonthinkMCP, DevonthinkMCPError
+from content_dedup import ContentDedup
 
 # Load environment variables
 load_dotenv(Path(__file__).resolve().parent.parent / '.env')
@@ -927,6 +928,17 @@ class DEVONzotService:
             self.devonthink = DEVONthinkInterface(DEVONTHINK_DATABASE)
             logger.info("DEVONthink control backend: AppleScript (legacy)")
         self.conflict_detector = ConflictDetector(self.zotero_api, self.devonthink)
+
+        # Content-dedup gate. Off by default; DEDUP_GATE_MODE=shadow (observe-only) | live.
+        # Forced off when there's no MCP client (AppleScript backend can't dedup by content).
+        _mcp_client = getattr(self.devonthink, "mcp", None)
+        self.dedup = ContentDedup(
+            _mcp_client,
+            DEVONZOT_PATH / "content_sha_index.json",
+            find_by_name=self._find_or_adopt_in_devonthink,
+            mode="off" if _mcp_client is None else None,
+        )
+
         self.state = self._load_state()
         self.running = False
         self.paused = False
@@ -1956,14 +1968,18 @@ class DEVONzotService:
                 zotero_filename = self._get_zotero_filename(attachment)
                 logger.info(f"📎 Processing attachment {attachment.key}: {filename}")
 
-                # Search DEVONthink for generated name, then Zotero name
-                dt_uuid = self._find_or_adopt_in_devonthink(filename, zotero_filename, dry_run)
+                # Content-dedup gate (pre-import): name search + optional content match.
+                _dedup_path = str(file_path) if file_on_disk else None
+                dt_uuid, _adopted, _sha = self.dedup.find_or_adopt_by_content(
+                    _dedup_path, filename, zotero_filename, dry_run)
 
                 if not dt_uuid:
                     if file_on_disk:
                         # Normal path: copy to DEVONthink Inbox
                         if self.devonthink.copy_file_to_inbox(str(file_path), filename, dry_run):
                             dt_uuid = self.devonthink.find_item_by_filename_after_wait(filename, dry_run)
+                            # Content-dedup safety net (post-import): adopt/observe DT duplicates.
+                            dt_uuid = self.dedup.reconcile_after_import(dt_uuid, _sha, dry_run)
                         else:
                             results['error'] += 1
                             logger.error(f"❌ Failed to copy file to inbox for {attachment.key}")
@@ -2169,14 +2185,18 @@ class DEVONzotService:
         zotero_filename = self._get_zotero_filename(attachment)
         logger.info(f"📎 Processing ZotFile attachment {attachment.key}: {filename}")
 
-        # Search DEVONthink for generated name, then Zotero name
-        dt_uuid = self._find_or_adopt_in_devonthink(filename, zotero_filename, dry_run)
+        # Content-dedup gate (pre-import): name search + optional content match.
+        _dedup_path = str(file_path) if file_on_disk else None
+        dt_uuid, _adopted, _sha = self.dedup.find_or_adopt_by_content(
+            _dedup_path, filename, zotero_filename, dry_run)
 
         if not dt_uuid:
             if file_on_disk:
                 # Normal path: copy to DEVONthink Inbox
                 if self.devonthink.copy_file_to_inbox(str(file_path), filename, dry_run):
                     dt_uuid = self.devonthink.find_item_by_filename_after_wait(filename, dry_run)
+                    # Content-dedup safety net (post-import): adopt/observe DT duplicates.
+                    dt_uuid = self.dedup.reconcile_after_import(dt_uuid, _sha, dry_run)
                 else:
                     logger.error(f"❌ Failed to copy file to inbox for {attachment.key}")
                     return result

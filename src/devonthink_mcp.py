@@ -226,3 +226,34 @@ class DevonthinkMCP:
         if isinstance(result, list):
             return result
         return []
+
+    # ---- content-dedup support (see src/content_dedup.py) ----
+
+    def get_record_duplicates(self, uuid: str) -> list:
+        """DEVONthink's content-hash duplicates of a record.
+
+        Returns a list of the *other* records DEVONthink considers byte-identical
+        (excludes the queried record itself); [] if none. Note: records excluded
+        from AI are filtered out of this result by the MCP server.
+        """
+        result = self._tool("get_record_duplicates", {"uuid": uuid})
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict):
+            return result.get("results", [])
+        return []
+
+    def set_record_custom_metadata(self, uuid: str, metadata: dict, mode: str = "merge"):
+        """Set custom metadata fields. mode='merge' overlays without dropping other
+        keys. Field identifiers must be alphanumeric (no underscores) — DEVONthink
+        auto-creates an unknown-but-valid field on first set.
+        """
+        return self._tool(
+            "set_record_custom_metadata",
+            {"uuid": uuid, "metadata": metadata, "mode": mode},
+        )
+
+    def get_record_custom_metadata(self, uuid: str) -> dict:
+        """Return a record's custom metadata as a {identifier: value} dict."""
+        result = self._tool("get_record_custom_metadata", {"uuid": uuid})
+        return result if isinstance(result, dict) else {}

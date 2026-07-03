@@ -37,7 +37,13 @@ attachment_pairs.json
 skipped_attachments.json
 skipped_zotfile_attachments.json
 storage_diagnostics_report.json
+dedup_backfill_report.json
+dedup_backfill_report.md
 www.zotero.org.har
+
+# Runtime service artifacts (rotated logs, pid)
+service.log*
+service.pid
 
 # Pipeline temp files
 tmp_extractions/
