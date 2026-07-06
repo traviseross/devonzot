@@ -419,11 +419,44 @@ service is disabled and re-enableable.
   - **Live-proven:** server `.env` (`DEVONZOT_USE_MCP=true`, `DEVONTHINK_MCP_ENDPOINTS=imac`) →
     `select_endpoint()` picks iMac → `copy_file_to_inbox` scp+import returned a real UUID → trashed →
     remote temp confirmed cleaned. v1 is iMac-only; the mbp block is present-but-commented in `.env`.
-- **Immediate next (WS2 — zotdav fast-path watcher):** inotify on
-  `/media/external/zotdav/data/zotero/` `.prop` CLOSE_WRITE → unzip paired `.zip` → enqueue KEY into
-  `run_incremental_sync_async`; startup sweep to drain pre-existing blobs; processed-key set.
-  NOTE: that dir is currently **empty** (0 pairs) — confirm the Zotero client still syncs to this
-  WebDAV (served by the `zotero_webdav` container) before relying on it for the WS5 live test.
+- **WS2 recon DONE 2026-07-06 (sync confirmed live; landing dir + a permission blocker found):**
+  - **Zotero WebDAV sync IS live/configured** — iMac `prefs.js`:
+    `sync.storage.protocol=webdav`, `url=zotdav.traviseross.com`, `verified=true`. The store is
+    empty only because the backlog drained and the user is holding new sources for the live test.
+  - **Landing dir confirmed = `/media/external/zotdav/data/zotero/`.** The `zotero_webdav`
+    container is `bytemark/webdav` serving `/media/external/zotdav/data/` as doc root;
+    `data/traviseross → zotero` is a symlink; Zotero stores `{KEY}.zip`+`{KEY}.prop` under
+    `zotero/`. Dir mtime Jun 29 (files were present until recently). Set `ZOTDAV_PATH` to this.
+  - **🚧 BLOCKER for the live watcher (not for building):** `data/zotero` is mode `770`, owned by
+    uid/gid **82** (the container user); `tradmin` (the systemd service user) gets **Permission
+    denied** — can't read or inotify-watch it. **Fix (run at/near WS5 cutover, needs sudo):**
+    grant tradmin read + a *default* ACL so new uploads are readable too:
+    `sudo setfacl -R -m u:tradmin:rX -m d:u:tradmin:rX /media/external/zotdav/data/zotero`
+    (default ACL is essential — the container writes new `{KEY}.zip` as uid 82). This is a
+    shared-infra change on the WebDAV store; coordinate as Infra. Until then the watcher can't see
+    live blobs (fixture tests are unaffected).
+- **WS2 (zotdav watcher) — CORE DONE 2026-07-06:**
+  - `src/zotdav_blob.py`: `parse_prop` (→ key/mtime/md5), `extract_blob` (unzip → primary
+    filename/path/md5; picks the largest member for multi-file web-snapshots), `list_pending_keys`
+    (complete pairs, oldest-first — the startup-sweep order). Pure/Linux-agnostic.
+  - `src/zotdav_watcher.py`: `ZotdavWatcher` — `key_if_ready`/`sweep` (pure) + `run()` inotify loop
+    (CLOSE_WRITE|MOVED_TO on `*.prop`, paired-`.zip` check; `inotify_simple` lazy-imported so the
+    module imports on macOS; cooperative stop via `read(timeout=)`; a consumer error can't kill the
+    loop). `inotify_simple>=1.3.5` added to requirements.
+  - `ServiceState.processed_attachment_keys` (attachment-KEY set, distinct from parent-key
+    `processed_items`) — the mid-purge reprocess guard. Back-compat: absent in old state → defaults [].
+  - Tests: `tests/test_zotdav_blob.py` (10) + `tests/test_zotdav_watcher.py` (4, incl. a live
+    inotify drop). Full offline suite 285 pass (8 URL-pipeline failures still pre-existing/OOS).
+  - **Deferred to WS5 (deliberately):** wiring the watcher's emitted KEYs into the live
+    `run_streaming_service` loop as a change-source. It can only be meaningfully validated with the
+    dir-permission fix applied + a real blob present, so it lands at cutover with the live e2e test
+    rather than half-wired now. The consumer contract is fixed: check `processed_attachment_keys`,
+    process via the existing per-attachment path, then record the KEY.
+- **Immediate next (WS5 cutover — its own step):** (1) apply the `setfacl` grant on the zotdav dir;
+  (2) wire the watcher into `run_streaming_service` (server profile) + the low-frequency backstop
+  reconcile; (3) `loginctl enable-linger` + enable the systemd unit; (4) user adds one real source →
+  confirm watcher fires → DEVONthink link on the Zotero record → attachment deleted → blob purges.
+  Also fold in the deferred SIGTERM cooperative-cancellation fix before enabling.
 - **Verify commands:** per-workstream Acceptance sections above.
 - **iMac service DISABLED early (2026-07-05):** `com.devonzot.service` stopped + persistently
   disabled (`launchctl disable` override survives login), plist left in place at

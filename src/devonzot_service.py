@@ -148,6 +148,10 @@ class ServiceState:
     dry_run_results: Dict[str, Any] = None
     pending_deletes: List[Dict[str, Any]] = None
     pending_downloads: List[Dict[str, Any]] = None
+    # zotdav fast-path: attachment KEYs whose blob has been handled. Distinct from
+    # processed_items (parent keys) — guards against reprocessing a {KEY}.zip that
+    # lingers in the WebDAV store mid-purge after its Zotero item was deleted.
+    processed_attachment_keys: List[str] = None
 
     def __post_init__(self):
         if self.processed_items is None:
@@ -162,6 +166,8 @@ class ServiceState:
             self.pending_deletes = []
         if self.pending_downloads is None:
             self.pending_downloads = []
+        if self.processed_attachment_keys is None:
+            self.processed_attachment_keys = []
 
 class FilenameGenerator:
     """Smart filename generation with configurable patterns"""
