@@ -421,12 +421,17 @@ service is disabled and re-enableable.
     remote temp confirmed cleaned. v1 is iMac-only; the mbp block is present-but-commented in `.env`.
 - **WS2 recon DONE 2026-07-06 (sync confirmed live; landing dir + a permission blocker found):**
   - **Zotero WebDAV sync IS live/configured** — iMac `prefs.js`:
-    `sync.storage.protocol=webdav`, `url=zotdav.traviseross.com`, `verified=true`. The store is
-    empty only because the backlog drained and the user is holding new sources for the live test.
+    `sync.storage.protocol=webdav`, `url=zotdav.traviseross.com`, `verified=true`.
+  - **CORRECTION (2026-07-06): the store is NOT empty — 9 pairs are waiting.** Earlier `ls`/`find`
+    as `tradmin` returned nothing because of the dir-permission wall (see blocker below), and that
+    was mis-read as "empty/backlog drained." `sudo ls` shows **8 standing backlog pairs (Jun 5–29)
+    + 1 test PDF added Jul 6** (`IRXDULWI` = "Nolland - The Gospel of Matthew - 2005 - Book.pdf",
+    322 KB). The backlog the plan originally described was real all along. The startup sweep will
+    drain all of these at cutover.
   - **Landing dir confirmed = `/media/external/zotdav/data/zotero/`.** The `zotero_webdav`
     container is `bytemark/webdav` serving `/media/external/zotdav/data/` as doc root;
     `data/traviseross → zotero` is a symlink; Zotero stores `{KEY}.zip`+`{KEY}.prop` under
-    `zotero/`. Dir mtime Jun 29 (files were present until recently). Set `ZOTDAV_PATH` to this.
+    `zotero/`. Set `ZOTDAV_PATH` to this.
   - **🚧 BLOCKER for the live watcher (not for building):** `data/zotero` is mode `770`, owned by
     uid/gid **82** (the container user); `tradmin` (the systemd service user) gets **Permission
     denied** — can't read or inotify-watch it. **Fix (run at/near WS5 cutover, needs sudo):**
