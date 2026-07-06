@@ -343,9 +343,23 @@ service is disabled and re-enableable.
 - **Client requirement confirmed:** DEVONthink presents **leaf-only** TLS → the DEVONzot MCP
   client must `verify=` the delivered **fullchain.pem**, not the system CA bundle. Calls need
   `Content-Type: application/json` + `Authorization: Bearer <token>`.
-- **Immediate next:** commit this plan + `scripts/install-devonthink-tls-identity.sh` to
-  `feat/server-orchestrator` so they clone to the server; then execute WS0 (server landing),
-  and WS1 can now integrate against the two *live* endpoints instead of mocks.
+- **WS0 (server landing) — STARTED 2026-07-06:** committed plan+script to
+  `feat/server-orchestrator` (`a04a2e2`, pushed); cloned to `/home/tradmin/DEVONzot` on the
+  server on that branch; copy manifest applied (`.claude/` CLAUDE.md+agents, `.code-workspace`,
+  `.env`); DEVONzot Team git identity set on the clone. Deps manifest is at `src/requirements.txt`
+  (not top-level). **Linux breakage catalogue (feeds WS3):**
+  (a) server has only Python **3.10**; target is 3.13 — provision 3.13 (uv/pyenv/deadsnakes) or
+  confirm 3.10 compatibility.
+  (b) **module fails to import** — logging `FileHandler` opens the hardcoded macOS path
+  `/Users/travisross/DEVONzot/service.log` at load → `FileNotFoundError` on Linux. All hardcoded
+  paths (`devonzot_service.py:51-62`) + logging setup must become `DEVONZOT_PATH`/config-driven
+  before it imports on the server.
+  (c) DT3→DT4 references still pending per the project CLAUDE.md.
+- **Immediate next:** a WS3-first slice — make paths/logging config-driven so the module imports
+  on Linux; provision Python 3.13; `pip install -r src/requirements.txt` in a venv; land the
+  disabled systemd skeleton; re-attempt `--dry-run`. Best as a focused build session (per the
+  plan's guidance that each workstream is decomposed at execution time on the server). WS1 can
+  then integrate against the two *live* endpoints instead of mocks.
 - **Verify commands:** per-workstream Acceptance sections above.
 - **iMac service DISABLED early (2026-07-05):** `com.devonzot.service` stopped + persistently
   disabled (`launchctl disable` override survives login), plist left in place at
