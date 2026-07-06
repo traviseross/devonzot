@@ -1,0 +1,34 @@
+# DEVONzot — systemd user service (Linux server profile).
+#
+# This is the Linux equivalent of the macOS launchd job (com.devonzot.service.plist).
+# It is the WS0 "disabled skeleton": install it but DO NOT enable/start it until the
+# server is the live orchestrator (WS5 cutover). Installing while the iMac service is
+# live — or double-running — would race two writers against one Zotero library.
+#
+# Install (disabled):
+#   mkdir -p ~/.config/systemd/user
+#   cp ops/devonzot.service ~/.config/systemd/user/devonzot.service
+#   systemctl --user daemon-reload
+#   systemctl --user is-enabled devonzot.service   # -> "disabled"
+#
+# Enable at cutover (WS5):
+#   loginctl enable-linger "$USER"                 # run without an active login session
+#   systemctl --user enable --now devonzot.service
+#
+# Logs: journalctl --user -u devonzot.service -f
+
+[Unit]
+Description=DEVONzot — Zotero <-> DEVONthink migration/sync service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/DEVONzot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/DEVONzot/venv/bin/python %h/DEVONzot/src/devonzot_service.py --service
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

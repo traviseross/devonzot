@@ -355,11 +355,38 @@ service is disabled and re-enableable.
   paths (`devonzot_service.py:51-62`) + logging setup must become `DEVONZOT_PATH`/config-driven
   before it imports on the server.
   (c) DT3→DT4 references still pending per the project CLAUDE.md.
-- **Immediate next:** a WS3-first slice — make paths/logging config-driven so the module imports
-  on Linux; provision Python 3.13; `pip install -r src/requirements.txt` in a venv; land the
-  disabled systemd skeleton; re-attempt `--dry-run`. Best as a focused build session (per the
-  plan's guidance that each workstream is decomposed at execution time on the server). WS1 can
-  then integrate against the two *live* endpoints instead of mocks.
+- **WS0 + WS3-slice — DONE 2026-07-06 (server imports + dry-run runs on Linux):**
+  - **Python decision: stay on 3.10** (target 3.13 dropped). `scripts/setup.sh` already accepts
+    3.10+; the whole `src/requirements.txt` (incl. lxml, newspaper3k, extruct, trafilatura)
+    installs cleanly into `venv/` on the server's 3.10.12. No 3.11+ syntax in the tree. Provision
+    3.13 later only if a dependency demands it.
+  - **Config/path generalization (fixes the import crash):** `DEVONZOT_PATH` now defaults to the
+    repo root (env-overridable); `LOG_FILE`/`STATE_FILE`/`PID_FILE` derive from it; logging setup
+    `mkdir -p`s the log dir before opening the handler. `ZOTERO_STORAGE_PATH`/`ZOTFILE_IMPORT_PATH`/
+    `DEVONTHINK_INBOX_PATH` are env-overridable macOS defaults, never dereferenced on `server`.
+    Added `DEVONZOT_PROFILE=server|mac` (default `mac` = unchanged historical behavior). Fixed the
+    two hardcoded `load_dotenv('/Users/...')` calls (`pipeline_add_url.py`,
+    `create_zotero_item_from_url.py`) + `diagnose_attachments.py` storage path.
+  - **Tests:** `tests/test_profile_paths.py` (6) — server-profile import touches no `/Users` path,
+    missing log dir is created, `mac` profile preserves macOS defaults, and `_resolve_storage_path`
+    returns `None` (not a crash) for macOS-style paths on Linux. Full offline core suite green
+    (260 pass). *Out of scope, pre-existing:* 8 URL-extraction-pipeline tests
+    (`test_pipeline_fallback`/`test_pipeline_integration`) fail on a `create_url_attachments` mock
+    mismatch — they were **collection-errors** (0 tests) before the import fix, so this is newly
+    *visible* Linux brittleness in the deferred zadd/URL path, not a regression. Triage separately.
+  - **Dry-run:** `venv/bin/python src/devonzot_service.py --dry-run` runs on Linux (correct
+    invocation — NOT `python -m src.devonzot_service`, which breaks on the flat imports). Reads the
+    live Zotero library (16,551 items), no writes, no macOS-path crash.
+  - **systemd skeleton:** `ops/devonzot.service` (user unit, `%h`-relative) installed to
+    `~/.config/systemd/user/` and left **disabled + inactive** (verified). Enable only at WS5.
+  - **Known robustness gap (not an A-blocker):** the service's SIGTERM handler logs "shutting down
+    gracefully" but the synchronous library-scan loop doesn't check the shutdown flag mid-scan, so
+    a kill during startup scan is ignored until the scan finishes (harness escalated to SIGKILL).
+    Worth a cooperative-cancellation check in the scan loop before WS5.
+- **Immediate next (WS1 — live network DT transport):** flip `DEVONZOT_USE_MCP=true`, add the
+  ordered `DEVONTHINK_MCP_ENDPOINTS` (iMac→MBP) + TLS `verify=fullchain.pem` + bearer to the MCP
+  client; implement `select_endpoint()` + scp delivery to `/private/tmp/devonzot/{KEY}/` + import +
+  cleanup behind the existing interface seam; integrate against the two *live* endpoints.
 - **Verify commands:** per-workstream Acceptance sections above.
 - **iMac service DISABLED early (2026-07-05):** `com.devonzot.service` stopped + persistently
   disabled (`launchctl disable` override survives login), plist left in place at

@@ -14,11 +14,13 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 from zotero_api_client import ZoteroAPIClient
 
-load_dotenv('/Users/travisross/DEVONzot/.env')
+# Load .env relative to the repo root so this works on any host (no hardcoded macOS path).
+load_dotenv(Path(__file__).resolve().parent.parent / '.env')
 
 ZOTERO_API_KEY = os.environ.get('ZOTERO_API_KEY')
 ZOTERO_USER_ID = os.environ.get('ZOTERO_USER_ID')

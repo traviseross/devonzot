@@ -22,7 +22,7 @@ from zotero_api_client import ZoteroAPIClient, LINK_MODE_MAP
 # Configuration
 load_dotenv(Path(__file__).resolve().parent.parent / '.env')
 
-ZOTERO_STORAGE_PATH = "/Users/travisross/Zotero/storage"
+ZOTERO_STORAGE_PATH = os.environ.get("ZOTERO_STORAGE_PATH", "/Users/travisross/Zotero/storage")
 OUTPUT_FILE = "storage_diagnostics_report.json"
 
 # Reverse mapping for display: int -> string

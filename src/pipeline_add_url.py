@@ -40,13 +40,13 @@ except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
 
-# Load environment variables
-load_dotenv('/Users/travisross/DEVONzot/.env')
+# Load environment variables (repo-root relative; DEVONZOT_PATH imported from devonzot_service)
+load_dotenv(DEVONZOT_PATH / '.env')
 
 # Configuration from environment
 ZOTERO_API_KEY = os.environ.get('ZOTERO_API_KEY')
 ZOTERO_USER_ID = os.environ.get('ZOTERO_USER_ID')
-TMP_DIR = Path(os.environ.get('TMP_DIR', '/Users/travisross/DEVONzot/tmp_extractions'))
+TMP_DIR = Path(os.environ.get('TMP_DIR', DEVONZOT_PATH / 'tmp_extractions'))
 EXTRACTION_TIMEOUT = int(os.environ.get('EXTRACTION_TIMEOUT', 120))
 DEBUG_MODE = os.environ.get('DEBUG_MODE', 'false').lower() == 'true'
 

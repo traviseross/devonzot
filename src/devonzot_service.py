@@ -47,18 +47,33 @@ ZOTERO_API_BASE = os.environ.get("ZOTERO_API_BASE", "https://api.zotero.org")
 API_VERSION = os.environ.get("API_VERSION", "3")
 RATE_LIMIT_DELAY = float(os.environ.get("RATE_LIMIT_DELAY", 0.0))
 
-# Configuration
-ZOTERO_STORAGE_PATH = "/Users/travisross/Zotero/storage"
-ZOTFILE_IMPORT_PATH = "/Users/travisross/ZotFile Import"
-DEVONTHINK_INBOX_PATH = "/Users/travisross/Library/Application Support/DEVONthink/Inbox"
+# Deployment profile. "mac" reproduces the historical macOS behavior (local Zotero
+# storage, AppleScript/local-MCP DEVONthink). "server" runs headless on Linux where
+# macOS-only paths (Zotero storage, DEVONthink Inbox) do not exist and are never
+# dereferenced — DEVONthink is reached over the network (see WS1) and file bytes come
+# from the zotdav store / Web API rather than a local Zotero library.
+DEVONZOT_PROFILE = os.environ.get("DEVONZOT_PROFILE", "mac").strip().lower()
+
+# Repo/runtime root. Defaults to the repo root (parent of src/) so state, logs, pid and
+# index files resolve on any host without a hardcoded macOS path; override with DEVONZOT_PATH.
+DEVONZOT_PATH = Path(os.environ.get("DEVONZOT_PATH", Path(__file__).resolve().parent.parent))
+
+# macOS-local library/DEVONthink paths. Kept as env-overridable macOS defaults for the
+# "mac" profile; on the "server" profile they are never dereferenced (dry-run counts any
+# missing local file as a problematic path rather than erroring).
+ZOTERO_STORAGE_PATH = os.environ.get("ZOTERO_STORAGE_PATH", "/Users/travisross/Zotero/storage")
+ZOTFILE_IMPORT_PATH = os.environ.get("ZOTFILE_IMPORT_PATH", "/Users/travisross/ZotFile Import")
+DEVONTHINK_INBOX_PATH = os.environ.get(
+    "DEVONTHINK_INBOX_PATH",
+    "/Users/travisross/Library/Application Support/DEVONthink/Inbox",
+)
 DEVONTHINK_DATABASE = "Professional"
 DEVONTHINK_GLOBAL_INBOX = "Global Inbox"
 # DEVONthink control backend: MCP (token auth, no AppleScript/TCC) vs legacy AppleScript.
 # Default OFF so deploying the code does not change behavior until DEVONZOT_USE_MCP is set in .env.
 USE_MCP = os.environ.get("DEVONZOT_USE_MCP", "false").strip().lower() in ("1", "true", "yes", "on")
-DEVONZOT_PATH = Path("/Users/travisross/DEVONzot")
 STATE_FILE = DEVONZOT_PATH / "service_state.json"
-LOG_FILE = DEVONZOT_PATH / "service.log"
+LOG_FILE = Path(os.environ.get("DEVONZOT_LOG_FILE", DEVONZOT_PATH / "service.log"))
 PID_FILE = DEVONZOT_PATH / "service.pid"
 
 # Service configuration
@@ -74,7 +89,10 @@ WEBSOCKET_ENABLED = os.environ.get("WEBSOCKET_ENABLED", "true").lower() == "true
 FALLBACK_POLL_INTERVAL = int(os.environ.get("FALLBACK_POLL_INTERVAL", "600"))  # 10 minutes
 FALLBACK_POLL_ENABLED = os.environ.get("FALLBACK_POLL_ENABLED", "true").lower() == "true"
 
-# Setup logging
+# Setup logging. Ensure the log directory exists before opening the handler so import
+# never fails on a fresh host (this was the first Linux breakage: a hardcoded macOS
+# log path raised FileNotFoundError at module load).
+LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -83,6 +101,7 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+logger.info(f"DEVONzot profile={DEVONZOT_PROFILE} root={DEVONZOT_PATH}")
 
 @dataclass
 class ZoteroItem:
