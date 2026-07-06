@@ -383,10 +383,47 @@ service is disabled and re-enableable.
     gracefully" but the synchronous library-scan loop doesn't check the shutdown flag mid-scan, so
     a kill during startup scan is ignored until the scan finishes (harness escalated to SIGKILL).
     Worth a cooperative-cancellation check in the scan loop before WS5.
-- **Immediate next (WS1 — live network DT transport):** flip `DEVONZOT_USE_MCP=true`, add the
-  ordered `DEVONTHINK_MCP_ENDPOINTS` (iMac→MBP) + TLS `verify=fullchain.pem` + bearer to the MCP
-  client; implement `select_endpoint()` + scp delivery to `/private/tmp/devonzot/{KEY}/` + import +
-  cleanup behind the existing interface seam; integrate against the two *live* endpoints.
+- **WS1 de-risking DONE 2026-07-06 (the WS4 `/private/tmp` gate is closed):**
+  - **Endpoint shape:** DEVONthink's MCP server binds **directly on `:8420`** with its own TLS
+    identity (NOT fronted by Caddy on 443). Endpoint = `https://imacdevonthink.traviseross.com:8420`
+    (iMac 192.168.1.103), `https://mbpdevonthink.traviseross.com:8420` (MBP, deferred). Server
+    section of `~/Library/Application Support/DEVONthink/MCP/config.json` confirms
+    `access=local-network, port=8420, tlsIdentity=<host>`. (Note: `auth.required=false` there, but
+    the bearer token is still accepted/needed — send it.)
+  - **Bearer token** lives in that iMac `config.json` (`auth.bearerToken`). Goes in the server
+    `.env` (gitignored), NOT source.
+  - **TLS trust (the real gotcha):** the server presents **leaf-only**. `curl --cacert fullchain.pem`
+    works, but Python `requests` with `verify=fullchain.pem` fails `unable to get issuer certificate`
+    (leaf-first bundle + the delivered ISRG roots aren't accepted as anchors). **Working fix:
+    `verify = certifi roots + the intermediate cert(s) from fullchain`** (server sends leaf-only, so
+    we only need to supply the missing intermediate; ISRG roots come from certifi). Rebuild this
+    bundle from the current fullchain at client init → renewal-safe. Cert delivered daily to
+    `~/docker/services/caddy/cert-delivery/<host>/fullchain.pem`.
+  - **Round-trip PROVEN:** server → scp to `iMac:/private/tmp/devonzot/TEST/` → MCP `import_file`
+    returned a real UUID → `get_record_properties` confirmed → `trash_record` cleaned up. This is
+    exactly the WS4 acceptance ("authenticated network import_file from the server returns a UUID for
+    a /private/tmp file"). DEVONthink (direct/non-MAS build) reads `/private/tmp`. ✅
+- **WS1 (network DT transport) — DONE 2026-07-06:**
+  - `DevonthinkMCP(cacert=...)` builds the certifi+intermediate verify bundle (renewal-safe,
+    content-hashed temp file). `DEVONTHINK_MCP_CACERT` also honored.
+  - `MCPEndpoint` model + `_parse_mcp_endpoints()` (per-label env: `DEVONTHINK_MCP_<L>_URL/
+    _TOKEN/_CACERT/_SSH`; ordered list = strict priority; no config => single local endpoint =
+    mac-profile default). `DEVONthinkMCPInterface.select_endpoint()` returns the first live
+    endpoint and binds `self.mcp` to it (downstream search/metadata/dedup hit the same synced Mac);
+    None => clean skip. `copy_file_to_inbox` scp's to `/private/tmp/devonzot/<uid>/` for a remote
+    endpoint, imports, and cleans the temp in a `finally` (leak-free on success OR failure).
+  - Tests: `tests/test_endpoint_transport.py` (10) — parsing, failover (iMac>MBP>None),
+    cleanup-on-success-and-on-failure, None=>skip (never a false success), local path direct-import,
+    TLS bundle drops leaf/keeps intermediate. Full offline suite 271 pass (8 URL-pipeline failures
+    still pre-existing/out of scope).
+  - **Live-proven:** server `.env` (`DEVONZOT_USE_MCP=true`, `DEVONTHINK_MCP_ENDPOINTS=imac`) →
+    `select_endpoint()` picks iMac → `copy_file_to_inbox` scp+import returned a real UUID → trashed →
+    remote temp confirmed cleaned. v1 is iMac-only; the mbp block is present-but-commented in `.env`.
+- **Immediate next (WS2 — zotdav fast-path watcher):** inotify on
+  `/media/external/zotdav/data/zotero/` `.prop` CLOSE_WRITE → unzip paired `.zip` → enqueue KEY into
+  `run_incremental_sync_async`; startup sweep to drain pre-existing blobs; processed-key set.
+  NOTE: that dir is currently **empty** (0 pairs) — confirm the Zotero client still syncs to this
+  WebDAV (served by the `zotero_webdav` container) before relying on it for the WS5 live test.
 - **Verify commands:** per-workstream Acceptance sections above.
 - **iMac service DISABLED early (2026-07-05):** `com.devonzot.service` stopped + persistently
   disabled (`launchctl disable` override survives login), plist left in place at

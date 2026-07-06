@@ -15,8 +15,14 @@ runs inside DEVONthink on the same Mac, so calls are local and fast.
 """
 
 import os
+import re
 import json
+import hashlib
 import logging
+import tempfile
+from pathlib import Path
+
+import certifi
 import requests
 
 logger = logging.getLogger(__name__)
@@ -24,13 +30,37 @@ logger = logging.getLogger(__name__)
 DEFAULT_URL = "http://localhost:8420"
 PROTOCOL_VERSION = "2025-03-26"
 
+_CERT_RE = re.compile(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", re.S)
+
+
+def _build_ca_bundle(cacert_path):
+    """Return a path to a verify bundle for a leaf-only TLS endpoint.
+
+    DEVONthink's MCP server presents its leaf certificate only (no intermediate),
+    so pointing `requests` at the delivered fullchain.pem fails to build a trust
+    chain ('unable to get issuer certificate'). The fix: trust the system roots
+    (certifi — has the ISRG roots) PLUS the intermediate(s) from the delivered
+    chain (everything after the leaf). Rebuilt from the current fullchain, so a
+    daily cert renewal is picked up automatically; the output file is named by a
+    content hash so we don't churn or leak temp files across restarts.
+    """
+    text = Path(cacert_path).read_text()
+    certs = _CERT_RE.findall(text)
+    intermediates = certs[1:] if len(certs) > 1 else certs  # drop the leaf
+    bundle = certifi.contents().rstrip() + "\n" + "\n".join(intermediates) + "\n"
+    digest = hashlib.sha256(bundle.encode()).hexdigest()[:16]
+    out = Path(tempfile.gettempdir()) / f"devonzot_ca_{digest}.pem"
+    if not out.exists():
+        out.write_text(bundle)
+    return str(out)
+
 
 class DevonthinkMCPError(Exception):
     """Raised when an MCP call fails (transport error or tool/RPC error)."""
 
 
 class DevonthinkMCP:
-    def __init__(self, url=None, token=None, timeout=60):
+    def __init__(self, url=None, token=None, timeout=60, cacert=None):
         self.url = url or os.environ.get("DEVONTHINK_MCP_URL", DEFAULT_URL)
         self.token = token or os.environ.get("DEVONTHINK_MCP_TOKEN", "")
         self.timeout = timeout
@@ -41,6 +71,11 @@ class DevonthinkMCP:
         })
         if self.token:
             self.session.headers["Authorization"] = f"Bearer {self.token}"
+        # TLS: a remote LAN endpoint delivers a fullchain.pem (leaf-only handshake);
+        # build a proper verify bundle from it. Local http/localhost needs nothing.
+        cacert = cacert or os.environ.get("DEVONTHINK_MCP_CACERT")
+        if cacert:
+            self.session.verify = _build_ca_bundle(cacert)
         self._id = 0
         self._session_id = None
         self._initialized = False

@@ -27,8 +27,9 @@ import logging
 from logging.handlers import RotatingFileHandler
 import asyncio
 from pathlib import Path
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Optional, Tuple
+from uuid import uuid4
 from datetime import datetime, timedelta
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -605,12 +606,72 @@ class DEVONthinkInterface:
             logger.error(f"Failed to rename {uuid}: {e}")
             return False
 
+@dataclass
+class MCPEndpoint:
+    """One DEVONthink MCP endpoint the service can target.
+
+    `ssh_host` None means a LOCAL endpoint (import a local path directly, no scp) —
+    the historical mac-profile behavior. A set `ssh_host` means a REMOTE Mac reached
+    over the LAN: the file is scp'd to that host's /private/tmp before import_file.
+    """
+    label: str
+    url: str
+    token: str = ""
+    cacert: Optional[str] = None
+    ssh_host: Optional[str] = None
+    client: DevonthinkMCP = field(default=None, repr=False)
+
+    def ensure_client(self) -> DevonthinkMCP:
+        if self.client is None:
+            self.client = DevonthinkMCP(url=self.url, token=self.token, cacert=self.cacert)
+        return self.client
+
+
+def _parse_mcp_endpoints() -> List[MCPEndpoint]:
+    """Build the ordered endpoint list from env (strict priority = list order).
+
+    DEVONTHINK_MCP_ENDPOINTS=imac,mbp  + per-label keys:
+      DEVONTHINK_MCP_<LABEL>_URL / _TOKEN / _CACERT / _SSH
+    With no endpoints configured, fall back to a single LOCAL endpoint using the
+    legacy DEVONTHINK_MCP_URL/DEVONTHINK_MCP_TOKEN (localhost) — mac-profile default.
+    """
+    labels = [l.strip() for l in os.environ.get("DEVONTHINK_MCP_ENDPOINTS", "").split(",") if l.strip()]
+    endpoints: List[MCPEndpoint] = []
+    for label in labels:
+        u = label.upper()
+        url = os.environ.get(f"DEVONTHINK_MCP_{u}_URL")
+        if not url:
+            logger.warning(f"MCP endpoint '{label}' has no DEVONTHINK_MCP_{u}_URL; skipping")
+            continue
+        endpoints.append(MCPEndpoint(
+            label=label,
+            url=url,
+            token=os.environ.get(f"DEVONTHINK_MCP_{u}_TOKEN", ""),
+            cacert=os.environ.get(f"DEVONTHINK_MCP_{u}_CACERT"),
+            ssh_host=os.environ.get(f"DEVONTHINK_MCP_{u}_SSH"),
+        ))
+    if not endpoints:
+        endpoints.append(MCPEndpoint(
+            label="local",
+            url=os.environ.get("DEVONTHINK_MCP_URL", "http://localhost:8420"),
+            token=os.environ.get("DEVONTHINK_MCP_TOKEN", ""),
+            cacert=os.environ.get("DEVONTHINK_MCP_CACERT"),
+            ssh_host=None,
+        ))
+    return endpoints
+
+
 class DEVONthinkMCPInterface:
     """DEVONthink control via the built-in MCP server (token auth, no AppleScript/TCC).
 
     Drop-in replacement for DEVONthinkInterface with the same public surface.
     `import_file` imports a file and returns its record UUID directly, so the
     legacy copy-to-Inbox -> wait -> title-search dance collapses into one call.
+
+    Endpoint-aware: holds an ordered endpoint list and, per import, selects the
+    first live one (strict iMac>MBP>None). For a remote endpoint the file is scp'd
+    to /private/tmp before import; the selected endpoint's client is bound to
+    self.mcp so downstream search/metadata calls hit the same (synced) Mac.
     """
 
     DATABASES = ["Global Inbox", "Professional", "Articles", "Books", "Research"]
@@ -629,13 +690,64 @@ class DEVONthinkMCPInterface:
     }
     DEFAULT_FILE_DATABASE = "Articles"
 
+    # Remote delivery target on the selected Mac. Non-sandboxed (direct) DEVONthink
+    # reads /private/tmp; each import gets its own ephemeral subdir, removed on success.
+    REMOTE_TMP_BASE = "/private/tmp/devonzot"
+
     def __init__(self, database_name: str = "Professional"):
         self.database_name = database_name
-        self.mcp = DevonthinkMCP()
+        self.endpoints = _parse_mcp_endpoints()
+        self._active_endpoint: Optional[MCPEndpoint] = None
+        # Bind self.mcp to the first endpoint's client as a default; select_endpoint()
+        # rebinds it to whichever endpoint is live at import time.
+        self.mcp = self.endpoints[0].ensure_client()
         self._pending_import_uuid = None
+        logger.info(
+            "DEVONthink MCP endpoints (priority order): "
+            + ", ".join(f"{e.label}({'remote:'+e.ssh_host if e.ssh_host else 'local'})" for e in self.endpoints)
+        )
+
+    def select_endpoint(self) -> Optional[MCPEndpoint]:
+        """Return the first reachable endpoint in priority order, or None.
+
+        None means the caller must treat the import as a clean SKIP (leave the item
+        unprocessed) — never a success. Binds self.mcp to the chosen endpoint so the
+        rest of the per-item chain (search/metadata/dedup) targets the same Mac.
+        """
+        for ep in self.endpoints:
+            try:
+                if ep.ensure_client().is_running():
+                    self._active_endpoint = ep
+                    self.mcp = ep.client
+                    return ep
+            except DevonthinkMCPError as e:
+                logger.debug(f"Endpoint {ep.label} probe failed: {e}")
+        self._active_endpoint = None
+        return None
 
     def is_devonthink_running(self) -> bool:
-        return self.mcp.is_running()
+        return self.select_endpoint() is not None
+
+    # ---- remote file delivery (scp to the selected Mac) ----
+
+    def _deliver_to_endpoint(self, ep: MCPEndpoint, file_path: str) -> Tuple[str, str]:
+        """scp the file to ep's /private/tmp/devonzot/<unique>/ and return
+        (remote_import_path, remote_dir). Raises on transport failure."""
+        remote_dir = f"{self.REMOTE_TMP_BASE}/{uuid4().hex[:12]}"
+        filename = Path(file_path).name
+        subprocess.run(["ssh", ep.ssh_host, "mkdir", "-p", remote_dir],
+                       check=True, capture_output=True, timeout=30)
+        subprocess.run(["scp", "-q", file_path, f"{ep.ssh_host}:{remote_dir}/"],
+                       check=True, capture_output=True, timeout=120)
+        return f"{remote_dir}/{filename}", remote_dir
+
+    def _cleanup_remote(self, ep: MCPEndpoint, remote_dir: str) -> None:
+        """Remove the ephemeral remote temp dir (best-effort; DT has already imported)."""
+        try:
+            subprocess.run(["ssh", ep.ssh_host, "rm", "-rf", remote_dir],
+                           check=False, capture_output=True, timeout=30)
+        except Exception as e:
+            logger.warning(f"Failed to clean remote temp {ep.ssh_host}:{remote_dir}: {e}")
 
     @classmethod
     def _keywords(cls, filename: str) -> List[str]:
@@ -663,7 +775,12 @@ class DEVONthinkMCPInterface:
         return None
 
     def copy_file_to_inbox(self, file_path: str, new_filename: str, dry_run=False) -> bool:
-        """Import the file into the Global Inbox via MCP; stash the resulting UUID."""
+        """Import the file into the Global Inbox via the selected MCP endpoint.
+
+        Selects a live endpoint (strict priority); for a remote endpoint the file is
+        scp'd to /private/tmp first. Returns False (a clean SKIP) when no endpoint is
+        reachable — the caller must NOT mark the item processed. Stashes the UUID.
+        """
         if dry_run:
             logger.info(f"[DRY RUN] Would import {file_path} to Global Inbox as '{new_filename}'")
             self._pending_import_uuid = "dry-run-uuid"
@@ -671,9 +788,22 @@ class DEVONthinkMCPInterface:
         if not Path(file_path).exists():
             logger.error(f"Source file not found: {file_path}")
             return False
+
+        ep = self.select_endpoint()
+        if ep is None:
+            logger.warning("No DEVONthink MCP endpoint reachable — skipping import "
+                           "(item left unprocessed for a later cycle)")
+            return False
+
+        remote_dir = None
         try:
+            if ep.ssh_host:
+                import_path, remote_dir = self._deliver_to_endpoint(ep, file_path)
+            else:
+                import_path = file_path
+
             inbox_uuid = self.mcp.database_uuid(DEVONTHINK_GLOBAL_INBOX)
-            rec = self.mcp.import_file(file_path, database_uuid=inbox_uuid)
+            rec = self.mcp.import_file(import_path, database_uuid=inbox_uuid)
             uuid = rec.get("uuid") if isinstance(rec, dict) else None
             if not uuid:
                 logger.error(f"MCP import returned no UUID for {file_path}: {rec}")
@@ -683,11 +813,17 @@ class DEVONthinkMCPInterface:
             except DevonthinkMCPError as e:
                 logger.warning(f"Imported {uuid} but rename to '{new_filename}' failed: {e}")
             self._pending_import_uuid = uuid
-            logger.info(f"Imported to Global Inbox: {new_filename} -> {uuid}")
+            logger.info(f"Imported to Global Inbox via {ep.label}: {new_filename} -> {uuid}")
             return True
-        except DevonthinkMCPError as e:
-            logger.error(f"MCP import failed for {file_path}: {e}")
+        except (DevonthinkMCPError, subprocess.SubprocessError, OSError) as e:
+            logger.error(f"MCP import failed for {file_path} via {ep.label}: {e}")
             return False
+        finally:
+            # DEVONthink copies the bytes into its database on import, so the /private/tmp
+            # source is disposable once we're here — clean it up whether or not import
+            # succeeded (only if we actually staged a remote copy).
+            if remote_dir:
+                self._cleanup_remote(ep, remote_dir)
 
     def find_item_by_filename_after_wait(self, filename: str, dry_run=False) -> Optional[str]:
         """Return the UUID from the just-completed import; fall back to a search."""
