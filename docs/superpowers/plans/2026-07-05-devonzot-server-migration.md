@@ -470,14 +470,23 @@ service is disabled and re-enableable.
   - **Failover validated live:** a transient iMac/MCP blip mid-sweep produced `skipped_no_endpoint`
     on 2 blobs — the clean-skip held (not deleted, not recorded), and a retry migrated both. This is
     the iMac-availability tolerance the whole design exists for.
-- **Remaining to be always-on (regroup point):**
-  1. Deferred SIGTERM cooperative-cancellation fix (scan loop) — do before enabling the daemon.
-  2. Wire the `ZotdavWatcher` into `run_streaming_service` (server profile) so NEW blobs are
-     processed in real time via `process_zotdav_key` (today the fast path is the one-shot
-     `--zotdav-sweep`); add the low-frequency backstop reconcile.
-  3. `loginctl enable-linger tradmin` + enable the `devonzot.service` systemd unit.
-  4. Note: 94LEK6TK (no-parent) re-attempts each sweep (harmless); MBP 2nd endpoint still deferred
-     but the blip is an argument for enabling it sooner.
+- **WS5 CUTOVER COMPLETE 2026-07-07 — the server is the live orchestrator:**
+  - `--zotdav-watch` entry point: sweep-first (drain), then the WS2 inotify `ZotdavWatcher` runs
+    real-time, calling `process_zotdav_key` per new blob. Cooperative SIGTERM shutdown (~1s) —
+    the deferred full-scan SIGTERM fix does NOT apply to this path (no library scan here).
+  - systemd user unit `devonzot.service` (ExecStart `--zotdav-watch`) **enabled + active**;
+    `loginctl enable-linger tradmin` so it runs with no active login. Verified: starts → sweeps →
+    inotify armed → healthy (MainPID running). Restarts on failure.
+  - iMac launchd service stays disabled (no race). Server now owns the fast path end to end.
+- **Follow-ups (not blockers; the fast path is live):**
+  1. **Backstop reconcile** — the low-frequency full-library API scan (metadata-only edits +
+     linked-file items the blob watcher can't see) is NOT yet scheduled on the server. Add as a
+     systemd timer running a reconcile, or run `--service` (streaming) alongside. Until then only
+     blob-producing changes (new stored attachments) are covered.
+  2. **MBP 2nd endpoint** — still iMac-only; the live mid-sweep blip is the argument to enable it.
+  3. 94LEK6TK (no-parent top-level attachment) re-attempts each sweep (harmless); give it a parent
+     in Zotero or it stays.
+  4. Optional real-time smoke test: add one Zotero source → watch it migrate within seconds.
 - **Verify commands:** per-workstream Acceptance sections above.
 - **iMac service DISABLED early (2026-07-05):** `com.devonzot.service` stopped + persistently
   disabled (`launchctl disable` override survives login), plist left in place at
