@@ -457,11 +457,27 @@ service is disabled and re-enableable.
     dir-permission fix applied + a real blob present, so it lands at cutover with the live e2e test
     rather than half-wired now. The consumer contract is fixed: check `processed_attachment_keys`,
     process via the existing per-attachment path, then record the KEY.
-- **Immediate next (WS5 cutover — its own step):** (1) apply the `setfacl` grant on the zotdav dir;
-  (2) wire the watcher into `run_streaming_service` (server profile) + the low-frequency backstop
-  reconcile; (3) `loginctl enable-linger` + enable the systemd unit; (4) user adds one real source →
-  confirm watcher fires → DEVONthink link on the Zotero record → attachment deleted → blob purges.
-  Also fold in the deferred SIGTERM cooperative-cancellation fix before enabling.
+- **WS5 cutover — IN PROGRESS 2026-07-07 (backlog DRAINED, one-shot path live):**
+  - `setfacl` read-grant applied (user) + verified — tradmin reads the store + default ACL covers
+    new uploads.
+  - `process_zotdav_key` + `sweep_zotdav` + `--zotdav-sweep` built/tested/committed (`22112f2`).
+    imports the local blob (not a macOS storage path), mirrors Phase 1A: import→child link→
+    metadata (files by item type)→delete Zotero attachment→record `processed_attachment_keys`.
+  - **Backlog drained via `--zotdav-sweep`:** of 11 blobs, **6 migrated** (Matthew/Nolland,
+    Winship transcript, Capes ×2, Novick 4.7 MB, Bancroft article — each imported to DEVONthink,
+    linked on its Zotero parent, attachment deleted), 4 orphaned (already gone from Zotero →
+    recorded, blobs are Zotero's to purge), 1 no-parent (skipped). 0 pending_deletes.
+  - **Failover validated live:** a transient iMac/MCP blip mid-sweep produced `skipped_no_endpoint`
+    on 2 blobs — the clean-skip held (not deleted, not recorded), and a retry migrated both. This is
+    the iMac-availability tolerance the whole design exists for.
+- **Remaining to be always-on (regroup point):**
+  1. Deferred SIGTERM cooperative-cancellation fix (scan loop) — do before enabling the daemon.
+  2. Wire the `ZotdavWatcher` into `run_streaming_service` (server profile) so NEW blobs are
+     processed in real time via `process_zotdav_key` (today the fast path is the one-shot
+     `--zotdav-sweep`); add the low-frequency backstop reconcile.
+  3. `loginctl enable-linger tradmin` + enable the `devonzot.service` systemd unit.
+  4. Note: 94LEK6TK (no-parent) re-attempts each sweep (harmless); MBP 2nd endpoint still deferred
+     but the blip is an argument for enabling it sooner.
 - **Verify commands:** per-workstream Acceptance sections above.
 - **iMac service DISABLED early (2026-07-05):** `com.devonzot.service` stopped + persistently
   disabled (`launchctl disable` override survives login), plist left in place at
