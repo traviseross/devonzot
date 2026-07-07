@@ -3668,6 +3668,9 @@ def main():
     parser.add_argument('--zotdav-sweep', action='store_true',
                         help='Process every pending zotdav blob once (server fast path). '
                              'Combine with --dry-run to preview without any writes.')
+    parser.add_argument('--zotdav-watch', action='store_true',
+                        help='Run the zotdav inotify watcher continuously (server fast path): '
+                             'sweep the backlog once, then migrate each new blob in real time.')
 
     args = parser.parse_args()
 
@@ -3694,6 +3697,22 @@ def main():
 
     if args.interactive:
         asyncio.run(service.run_interactive(dry_run=args.dry_run))
+        return
+
+    if args.zotdav_watch:
+        from zotdav_watcher import ZotdavWatcher
+        watcher = ZotdavWatcher(service.zotdav_path,
+                                on_key=lambda k: service.process_zotdav_key(k, dry_run=False))
+
+        def _stop_watch(signum, frame):
+            logger.info(f"Received signal {signum} — stopping zotdav watcher")
+            watcher.stop()
+        signal.signal(signal.SIGINT, _stop_watch)
+        signal.signal(signal.SIGTERM, _stop_watch)
+
+        logger.info(f"zotdav watch starting on {service.zotdav_path} (sweep-first, then real time)")
+        watcher.run(sweep_first=True)  # drains backlog, then blocks watching until signalled
+        logger.info("zotdav watch exited")
         return
 
     if args.zotdav_sweep:

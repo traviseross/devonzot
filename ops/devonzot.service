@@ -26,7 +26,10 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/DEVONzot
 Environment=PYTHONUNBUFFERED=1
-ExecStart=%h/DEVONzot/venv/bin/python %h/DEVONzot/src/devonzot_service.py --service
+# Server role = the zotdav fast path: sweep the backlog once, then watch the WebDAV
+# store (inotify) and migrate each new blob to DEVONthink in real time. The watcher
+# shuts down cooperatively on SIGTERM (systemd stop), so no forced kill is needed.
+ExecStart=%h/DEVONzot/venv/bin/python %h/DEVONzot/src/devonzot_service.py --zotdav-watch
 Restart=on-failure
 RestartSec=30
 
