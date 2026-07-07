@@ -34,9 +34,11 @@ from datetime import datetime, timedelta
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
+import tempfile
 from zotero_api_client import ZoteroAPIClient
 from devonthink_mcp import DevonthinkMCP, DevonthinkMCPError
 from content_dedup import ContentDedup
+from zotdav_blob import extract_blob, list_pending_keys, ZotdavBlobError
 
 # Load environment variables
 load_dotenv(Path(__file__).resolve().parent.parent / '.env')
@@ -70,6 +72,9 @@ DEVONTHINK_INBOX_PATH = os.environ.get(
 )
 DEVONTHINK_DATABASE = "Professional"
 DEVONTHINK_GLOBAL_INBOX = "Global Inbox"
+# zotdav fast-path store (server profile). The Zotero WebDAV file-sync target: each
+# stored attachment appears here as {KEY}.zip + {KEY}.prop. Empty/unused on mac profile.
+ZOTDAV_PATH = os.environ.get("ZOTDAV_PATH", "/media/external/zotdav/data/zotero")
 # DEVONthink control backend: MCP (token auth, no AppleScript/TCC) vs legacy AppleScript.
 # Default OFF so deploying the code does not change behavior until DEVONZOT_USE_MCP is set in .env.
 USE_MCP = os.environ.get("DEVONZOT_USE_MCP", "false").strip().lower() in ("1", "true", "yes", "on")
@@ -1101,6 +1106,7 @@ class DEVONzotService:
         )
 
         self.state = self._load_state()
+        self.zotdav_path = ZOTDAV_PATH
         self.running = False
         self.paused = False
         self.restart_count = 0
@@ -1140,7 +1146,128 @@ class DEVONzotService:
             os.replace(tmp_path, STATE_FILE)
         except Exception as e:
             logger.error(f"Could not save state: {e}")
-    
+
+    # ---- zotdav fast path (server profile): process a blob KEY end-to-end ----
+
+    def process_zotdav_key(self, key: str, dry_run: bool = False) -> Dict[str, Any]:
+        """Migrate one zotdav attachment KEY using its local WebDAV blob.
+
+        The server has the bytes already (the {KEY}.zip), so we import THAT file rather
+        than resolving a (nonexistent-on-server) Zotero storage path. Mirrors the Phase
+        1A success chain — import -> child link -> metadata -> delete the Zotero
+        attachment (which makes Zotero purge the blob) -> record. Every write is
+        dry_run-guarded. imported_url (snapshot) attachments are deleted, not imported
+        (Phase 0 behavior). Returns a result dict for reporting.
+        """
+        res: Dict[str, Any] = {"key": key, "result": "error", "action": None,
+                               "filename": None, "uuid": None, "link_mode": None}
+
+        if key in self.state.processed_attachment_keys:
+            res["result"] = "skipped_already_processed"
+            return res
+
+        zip_path = Path(self.zotdav_path) / f"{key}.zip"
+        if not zip_path.exists():
+            res["result"] = "skipped_no_blob"
+            return res
+
+        # Surgical lookup (NOT a library scan): the attachment item + its parent.
+        att_raw = self.zotero_api.get_item_raw(key)
+        if not att_raw:
+            # Attachment already deleted from Zotero; the blob is a mid-purge leftover.
+            res["result"] = "skipped_not_in_zotero"
+            if not dry_run:
+                self.state.processed_attachment_keys.append(key)
+                self._save_state()
+            return res
+        data = att_raw.get("data", {})
+        link_mode = data.get("linkMode", "")
+        version = data.get("version", 0)
+        parent_key = data.get("parentItem")
+        res["link_mode"] = link_mode
+
+        # imported_url snapshots: Phase 0 deletes them, never imports.
+        if link_mode == "imported_url":
+            res["action"] = "delete_imported_url"
+            res["result"] = "deleted" if not dry_run else "would_delete"
+            if not dry_run:
+                if not self.zotero_api.delete_attachment(key, version):
+                    self.state.pending_deletes.append({"key": key, "version": version})
+                self.state.processed_attachment_keys.append(key)
+                self._save_state()
+            else:
+                logger.info(f"[DRY RUN] {key} (imported_url) — would delete attachment (Phase 0)")
+            return res
+
+        if not parent_key:
+            res["result"] = "skipped_no_parent"
+            return res
+        parent_item = self.zotero_api.get_item(parent_key)
+        if not parent_item:
+            res["result"] = "skipped_parent_not_found"
+            return res
+
+        filename = FilenameGenerator.generate_filename(parent_item)
+        res["filename"] = filename
+        res["action"] = "migrate"
+
+        tmp_dir = Path(tempfile.mkdtemp(prefix=f"zotdav_{key}_"))
+        try:
+            try:
+                blob = extract_blob(zip_path, tmp_dir)
+            except ZotdavBlobError as e:
+                logger.error(f"zotdav {key}: blob unreadable: {e}")
+                return res
+
+            if dry_run:
+                logger.info(f"[DRY RUN] {key} -> import '{blob['filename']}' as '{filename}', "
+                            f"link on parent {parent_key}, then delete Zotero attachment {key}")
+                res["result"] = "would_migrate"
+                return res
+
+            # Live: import the blob file via the selected DEVONthink endpoint.
+            if not self.devonthink.copy_file_to_inbox(blob["path"], filename, dry_run=False):
+                # No endpoint reachable (or import failed) -> clean skip, leave for retry.
+                res["result"] = "skipped_no_endpoint"
+                return res
+            dt_uuid = self.devonthink.find_item_by_filename_after_wait(filename, dry_run=False)
+            if not dt_uuid:
+                res["result"] = "error_no_uuid"
+                return res
+            res["uuid"] = dt_uuid
+
+            if not self._create_devonthink_child_link(parent_key, dt_uuid, title=filename, dry_run=False):
+                res["result"] = "error_link"
+                return res
+            if not self.devonthink.update_item_metadata(dt_uuid, parent_item, dry_run=False):
+                res["result"] = "error_metadata"
+                return res
+
+            # Delete the Zotero attachment item -> Zotero purges the blob on next sync.
+            if not self.zotero_api.delete_attachment(key, version):
+                self.state.pending_deletes.append({"key": key, "version": version})
+            self.state.processed_attachment_keys.append(key)
+            if parent_key not in self.state.processed_items:
+                self.state.processed_items.append(parent_key)
+            self._save_state()
+            res["result"] = "success"
+            logger.info(f"zotdav {key}: migrated -> {dt_uuid} ('{filename}')")
+            return res
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def sweep_zotdav(self, dry_run: bool = False) -> Dict[str, Any]:
+        """Process every complete pair in the zotdav store (oldest first). This is the
+        startup drain and the watcher's per-key handler share `process_zotdav_key`."""
+        keys = list_pending_keys(self.zotdav_path)
+        summary: Dict[str, Any] = {"total": len(keys), "by_result": {}, "details": []}
+        logger.info(f"zotdav sweep ({'DRY RUN' if dry_run else 'LIVE'}): {len(keys)} pending pair(s)")
+        for key in keys:
+            r = self.process_zotdav_key(key, dry_run=dry_run)
+            summary["by_result"][r["result"]] = summary["by_result"].get(r["result"], 0) + 1
+            summary["details"].append(r)
+        return summary
+
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals (works in both sync and async modes)"""
         logger.info(f"Received signal {signum}, shutting down gracefully...")
@@ -3538,6 +3665,9 @@ def main():
                         help='Disable WebSocket streaming, use polling only')
     parser.add_argument('--interactive', action='store_true',
                         help='Step through records one at a time with y/n/q prompts (implies --once)')
+    parser.add_argument('--zotdav-sweep', action='store_true',
+                        help='Process every pending zotdav blob once (server fast path). '
+                             'Combine with --dry-run to preview without any writes.')
 
     args = parser.parse_args()
 
@@ -3564,6 +3694,16 @@ def main():
 
     if args.interactive:
         asyncio.run(service.run_interactive(dry_run=args.dry_run))
+        return
+
+    if args.zotdav_sweep:
+        summary = service.sweep_zotdav(dry_run=args.dry_run)
+        mode = "DRY RUN" if args.dry_run else "LIVE"
+        print(f"\n=== zotdav sweep ({mode}) — {summary['total']} pending pair(s) ===")
+        for r in summary["details"]:
+            print(f"  {r['key']}  [{r.get('link_mode') or '?'}]  {r['result']}"
+                  + (f"  -> {r['filename']}" if r.get("filename") else ""))
+        print(f"tally: {summary['by_result']}")
         return
 
     if args.dry_run:
