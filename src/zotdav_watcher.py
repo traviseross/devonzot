@@ -12,6 +12,7 @@ consumer's job (ServiceState.processed_attachment_keys), not the watcher's.
 
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -21,10 +22,19 @@ logger = logging.getLogger(__name__)
 
 
 class ZotdavWatcher:
-    def __init__(self, zotdav_dir, on_key: Callable[[str], None], read_timeout_ms: int = 1000):
+    def __init__(self, zotdav_dir, on_key: Callable[[str], None], read_timeout_ms: int = 1000,
+                 on_interval: Optional[Callable[[], None]] = None, interval_sec: int = 1800):
         self.zotdav_dir = Path(zotdav_dir)
         self.on_key = on_key
         self.read_timeout_ms = read_timeout_ms
+        # Periodic re-sweep hook: inotify only sees NEW completions, so a blob the
+        # consumer skipped (e.g. endpoint blip -> skipped_no_endpoint) or that landed
+        # while the process was down never re-fires. Calling on_interval every
+        # interval_sec between reads lets the watcher self-heal those misses without a
+        # second writer — the consumer's own idempotency guard makes re-sweeps a no-op
+        # for already-migrated keys.
+        self.on_interval = on_interval
+        self.interval_sec = interval_sec
         self._stop = threading.Event()
 
     # --- pure logic (unit-testable without inotify) ---
@@ -65,9 +75,12 @@ class ZotdavWatcher:
             self.sweep()
 
         inotify = INotify()
+        last_resweep = time.monotonic()
         try:
             inotify.add_watch(str(self.zotdav_dir), flags.CLOSE_WRITE | flags.MOVED_TO)
             logger.info(f"zotdav watcher armed on {self.zotdav_dir}")
+            if self.on_interval:
+                logger.info(f"zotdav periodic re-sweep every {self.interval_sec}s (self-heal misses)")
             while not self._stop.is_set():
                 for event in inotify.read(timeout=self.read_timeout_ms):
                     key = self.key_if_ready(event.name)
@@ -77,6 +90,14 @@ class ZotdavWatcher:
                             self.on_key(key)
                         except Exception as e:  # never let a consumer error kill the loop
                             logger.error(f"zotdav on_key({key}) failed: {e}")
+                # Periodic re-sweep between reads (drains any skipped/missed blobs).
+                if self.on_interval and (time.monotonic() - last_resweep) >= self.interval_sec:
+                    last_resweep = time.monotonic()
+                    logger.info("zotdav periodic re-sweep: retrying any skipped/missed blobs")
+                    try:
+                        self.on_interval()
+                    except Exception as e:  # a re-sweep failure must not kill the loop
+                        logger.error(f"zotdav periodic re-sweep failed: {e}")
         finally:
             inotify.close()
             logger.info("zotdav watcher stopped")

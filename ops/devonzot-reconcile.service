@@ -1,0 +1,36 @@
+# DEVONzot reconcile — systemd user oneshot (Linux server profile).
+#
+# The low-frequency API-scanning BACKSTOP behind the always-on zotdav watcher
+# (devonzot.service, --zotdav-watch). The watcher only sees NEW stored blobs; this
+# catches everything it's blind to and is server-safe:
+#   * metadata-only edits to already-migrated parents  -> push to DEVONthink
+#   * linkMode=2 (ZotFile) items                        -> link if in DEVONthink (never delete)
+#   * imported_url (linkMode=1)                         -> delete the snapshot
+#   * deletions in Zotero                               -> prune local state
+# It NEVER migrates/cloud-downloads a stored blob (the watcher owns those; single writer).
+#
+# Oneshot -> no SIGTERM concern. Driven by devonzot-reconcile.timer (every 2h).
+# DEVONZOT_PROFILE=server comes from %h/DEVONzot/.env via python-dotenv (load_dotenv),
+# the same source the watcher service uses.
+#
+# Install:
+#   cp ops/devonzot-reconcile.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now devonzot-reconcile.timer   # linger already on (WS5)
+#
+# Logs: journalctl --user -u devonzot-reconcile.service
+
+[Unit]
+Description=DEVONzot reconcile — server-safe API backstop for the zotdav watcher
+Documentation=file:///home/tradmin/DEVONzot/.claude/plans/we-re-finishing-the-transfer-reflective-spindle.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# oneshot enforces TimeoutStartSec (default ~90s). An incremental run is quick, but the
+# first run after a fresh/seeded state can diff a large window, so allow ample headroom.
+TimeoutStartSec=1800
+WorkingDirectory=%h/DEVONzot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/DEVONzot/venv/bin/python %h/DEVONzot/src/devonzot_service.py --reconcile

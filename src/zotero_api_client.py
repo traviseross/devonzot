@@ -692,6 +692,23 @@ class ZoteroAPIClient:
 
         return all_items
 
+    def get_item_children(self, parent_key: str) -> List[Dict]:
+        """Fetch just one parent's child items (attachments/notes) in a single request.
+
+        GET /items/{key}/children — the targeted alternative to scanning the whole
+        attachment list. On the server (2s rate limit) a full-library attachment fetch
+        costs ~100 paginated requests; this costs one, so it's the right lookup when you
+        only need a single parent's children (e.g. finding its DEVONthink link).
+        """
+        self._rate_limit()
+        url = f'{self.api_base}/users/{self.user_id}/items/{parent_key}/children'
+        response = self._safe_request('GET', url, params={'format': 'json'})
+        if not response or response.status_code != 200:
+            status = response.status_code if response else 'No response'
+            logger.debug(f"No children fetched for {parent_key}: {status}")
+            return []
+        return response.json()
+
     def get_deleted_since(self, since_version: int) -> Dict[str, List[str]]:
         """Fetch keys of items deleted since a library version.
 

@@ -1,0 +1,20 @@
+# DEVONzot reconcile timer — runs the server-safe API backstop every 2h.
+#
+# Follows the ops/disk/etc/systemd/disk-monitor.timer convention
+# (OnBootSec + OnUnitActiveSec + Persistent). Persistent=true fires a missed run
+# after the box was asleep/off. Low frequency by design: the zotdav watcher handles
+# real-time blob migration; this only mops up what the watcher can't see.
+
+[Unit]
+Description=Run DEVONzot reconcile every 2h (backstop for the zotdav watcher)
+Documentation=file:///home/tradmin/DEVONzot/ops/devonzot-reconcile.service
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=2h
+AccuracySec=5min
+Persistent=true
+Unit=devonzot-reconcile.service
+
+[Install]
+WantedBy=timers.target

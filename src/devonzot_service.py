@@ -146,6 +146,7 @@ class ServiceState:
     """Service state tracking"""
     last_sync: Optional[str] = None
     last_zotero_check: Optional[str] = None
+    last_reconcile: Optional[str] = None
     last_library_version: Optional[int] = None
     last_phase0_library_version: Optional[int] = None
     processed_items: List[str] = None
@@ -2488,8 +2489,20 @@ class DEVONzotService:
                 else:
                     logger.error(f"❌ Failed to copy file to inbox for {attachment.key}")
                     return result
+            elif DEVONZOT_PROFILE == "server":
+                # Server profile: linkMode=2 files live on a Mac we can't reach, so
+                # "not on disk" is NOT evidence the attachment is broken. NEVER delete
+                # (unsafe behavior #2) — skip and leave the record intact for the Mac.
+                reason = "file not accessible on server and not in DEVONthink — skipped (never delete)"
+                logger.info(f"⏭️  Attachment {attachment.key}: {reason}")
+                result['result'] = 'skipped_file_missing'
+                result['skip_detail'] = {
+                    'key': attachment.key, 'reason': reason,
+                    'path': str(file_path), 'parent_key': attachment.parent_key,
+                }
+                return result
             else:
-                # File missing everywhere — broken attachment, clean up
+                # File missing everywhere — broken attachment, clean up (mac profile only)
                 result['result'] = 'cleaned_broken'
                 result['cleaned_broken'] = True
                 if not dry_run:
@@ -3219,6 +3232,218 @@ class DEVONzotService:
             logger.error(f"Incremental sync failed: {e}", exc_info=True)
             return False
 
+    def _reconcile_parent_metadata(self, parent_key: str, dry_run: bool,
+                                   summary: Dict[str, Any]) -> None:
+        """Push a changed parent's metadata to its already-migrated DEVONthink record.
+
+        Safe: no files, no deletes. Finds the parent's linked_url child, extracts the
+        UUID from its x-devonthink-item://UUID url, and reuses update_item_metadata.
+
+        Uses a TARGETED children fetch (one request) rather than _find_devonthink_link's
+        full-library attachment scan — on the server's 2s rate limit that scan costs
+        ~100 requests and would dominate every run.
+        """
+        prefix = 'x-devonthink-item://'
+        uuid = None
+        for child in self.zotero_api.get_item_children(parent_key):
+            data = child.get('data', {})
+            child_url = (data.get('url', '') or '')
+            if data.get('linkMode') == 'linked_url' and child_url.startswith(prefix):
+                uuid = child_url[len(prefix):].strip()
+                break
+        if not uuid:
+            summary["skipped"] += 1
+            return
+        parent_item = self.zotero_api.get_item(parent_key)
+        if not parent_item:
+            summary["skipped"] += 1
+            return
+        if self.devonthink.update_item_metadata(uuid, parent_item, dry_run):
+            summary["metadata_updated"] += 1
+            logger.info(f"Reconcile: metadata → DEVONthink {uuid} (parent {parent_key})")
+        else:
+            summary["errors"] += 1
+
+    def _save_state_merged(self, advance_to_version: Optional[int], pruned_keys: set) -> None:
+        """Persist reconcile's changes without clobbering the concurrent watcher.
+
+        service_state.json has two writers: the always-on watcher (devonzot.service,
+        appends processed_*_keys as blobs migrate) and this reconcile oneshot. Rather than
+        overwrite the file with our possibly-stale copy, reload the watcher's freshest
+        state as the base and layer our deltas: UNION the key lists (so watcher additions
+        survive), then subtract keys we pruned via deletions, and merge pending_deletes.
+        The write itself is atomic (tmp + os.replace), so the only race window is the
+        microseconds between this reload and the replace.
+        """
+        base = self._load_state()
+        base.processed_attachment_keys = sorted(
+            (set(base.processed_attachment_keys) | set(self.state.processed_attachment_keys)) - pruned_keys)
+        base.processed_items = sorted(
+            (set(base.processed_items) | set(self.state.processed_items)) - pruned_keys)
+        seen = {d.get("key") for d in base.pending_deletes}
+        for d in self.state.pending_deletes:
+            if d.get("key") not in seen:
+                base.pending_deletes.append(d)
+        if advance_to_version:
+            base.last_library_version = advance_to_version
+        base.last_reconcile = datetime.now().isoformat()
+        self.state = base
+        self._save_state()
+
+    async def reconcile(self, dry_run=False, deep=False) -> Dict[str, Any]:
+        """Server-safe API reconcile — the low-frequency backstop behind the zotdav watcher.
+
+        The inotify watcher only sees NEW stored blobs. This resurrects the old full-scan's
+        coverage of everything the watcher is structurally blind to, minus the two
+        Mac-only behaviors that are unsafe on the server:
+
+          * Metadata-only edits to already-migrated parents → push to DEVONthink (safe).
+          * linkMode=2 (ZotFile) items → SEARCH-ONLY: link if already in DEVONthink,
+            never delete when the file is unreachable (guarded in
+            _process_single_zotfile_attachment under DEVONZOT_PROFILE=server).
+          * imported_url (linkMode=1) → delete the snapshot (Phase 0 behavior).
+          * imported_file (linkMode=0) stored blobs → SKIP: the watcher owns these
+            (single-writer invariant); never cloud-download on the server.
+          * Deletions in Zotero → prune local state.
+
+        Incremental via state.last_library_version. deep=True adds a full linkMode=2
+        safe-link sweep (Phase 2) to catch items missed incrementally.
+        """
+        summary: Dict[str, Any] = {
+            "changed": 0, "metadata_updated": 0, "zotfile_linked": 0,
+            "imported_url_deleted": 0, "stored_skipped": 0, "deleted_pruned": 0,
+            "skipped": 0, "errors": 0, "dry_run": dry_run, "deep": deep,
+        }
+        # Keys pruned this run (deletions) — subtracted from the merge-with-watcher union
+        # at save time so a concurrent watcher write can't resurrect them.
+        pruned_keys: set = set()
+
+        # Reload the freshest on-disk state: the watcher (devonzot.service) is the other
+        # writer of service_state.json and may have advanced processed_*_keys since our
+        # process started. Working from disk minimizes what a concurrent write can clobber.
+        self.state = self._load_state()
+        self.zotero_api.invalidate_caches()
+
+        # First run has no baseline (the watcher never writes last_library_version, so it
+        # is None here). Diffing from 0 would rescan the ENTIRE library (16k+ items) and
+        # mass-delete every historical imported_url — not what a low-frequency backstop
+        # should do. Instead establish the baseline at the current version and return; the
+        # next run reconciles forward from here. (A one-time historical pass is a separate,
+        # deliberate op.)
+        if self.state.last_library_version is None:
+            self.zotero_api.get_changed_item_versions(2**31)  # cheap: sets last_library_version from header
+            current = self.zotero_api.last_library_version
+            logger.info(f"Reconcile: no baseline yet — initializing last_library_version={current} "
+                        f"(no changes processed this run)")
+            summary["baseline_initialized"] = current
+            if not dry_run and current:
+                self._save_state_merged(current, pruned_keys)
+            return summary
+
+        # V-1 so items at exactly last_library_version aren't excluded by Zotero's
+        # exclusive ?since=V semantics (mirrors run_incremental_sync_async).
+        v = self.state.last_library_version
+        since_version = (v - 1) if v else 0
+        logger.info(f"Reconcile ({'DRY RUN' if dry_run else 'LIVE'}) — since library version {since_version}")
+
+        # Step 1: ALL changed items — NO item_type filter (the key resurrection: this
+        # returns changed parents too, not just attachments).
+        changed = self.zotero_api.get_changed_item_versions(since_version)
+        if not changed:
+            logger.info("Reconcile: no changed items since last run")
+        else:
+            summary["changed"] = len(changed)
+            logger.info(f"Reconcile: {len(changed)} changed item(s) to classify")
+            items = self.zotero_api.get_items_by_keys(list(changed.keys()))
+            for api_item in items:
+                data = api_item.get('data', {})
+                item_type = data.get('itemType', '')
+                key = data.get('key') or api_item.get('key')
+
+                if item_type != 'attachment':
+                    # Parent / regular item: metadata edit → update DT if already migrated.
+                    if key in self.state.processed_items:
+                        self._reconcile_parent_metadata(key, dry_run, summary)
+                    else:
+                        summary["skipped"] += 1
+                    continue
+
+                link_mode = data.get('linkMode', '')
+                if link_mode == 'imported_url':
+                    # Phase 0: delete the useless snapshot attachment.
+                    version = data.get('version', 0)
+                    if dry_run:
+                        logger.info(f"[DRY RUN] Reconcile: would delete imported_url {key}")
+                        summary["imported_url_deleted"] += 1
+                    else:
+                        if self.zotero_api.delete_attachment(key, version):
+                            summary["imported_url_deleted"] += 1
+                        else:
+                            self.state.pending_deletes.append({"key": key, "version": version})
+                            summary["errors"] += 1
+                        if key not in self.state.processed_attachment_keys:
+                            self.state.processed_attachment_keys.append(key)
+                elif link_mode == 'linked_file':
+                    # ZotFile: search-only on server (destructive branch is guarded).
+                    attachment = self.zotero_api._api_item_to_zotero_attachment(api_item)
+                    try:
+                        outcome = self._process_single_zotfile_attachment(attachment, dry_run)
+                        r = outcome['result']
+                        if r == 'success':
+                            summary["zotfile_linked"] += 1
+                        elif r.startswith('skipped_') or r == 'cleaned_broken':
+                            summary["skipped"] += 1
+                        else:
+                            summary["errors"] += 1
+                    except Exception as e:
+                        logger.error(f"Reconcile: linkMode=2 {attachment.key} failed: {e}")
+                        summary["errors"] += 1
+                elif link_mode == 'imported_file':
+                    # Stored blob: OWNED BY THE WATCHER. Never migrate here (single-writer;
+                    # no cloud download on the server — unsafe behavior #1).
+                    summary["stored_skipped"] += 1
+                    if key not in self.state.processed_attachment_keys:
+                        logger.info(f"Reconcile: changed stored attachment {key} not yet "
+                                    f"processed — leaving for the watcher's re-sweep")
+                else:
+                    summary["skipped"] += 1
+
+        # Step 6: Deletions → prune local state so it doesn't drift.
+        deleted = self.zotero_api.get_deleted_since(since_version)
+        for key in deleted.get('items', []):
+            pruned = False
+            if key in self.state.processed_items:
+                self.state.processed_items.remove(key)
+                pruned = True
+            if key in self.state.processed_attachment_keys:
+                self.state.processed_attachment_keys.remove(key)
+                pruned = True
+            if pruned:
+                pruned_keys.add(key)
+                summary["deleted_pruned"] += 1
+
+        # Step 8: occasional deep pass — full linkMode=2 safe-link sweep (search + link
+        # only; server-safe). Catches items missed incrementally.
+        if deep:
+            logger.info("Reconcile deep pass: full ZotFile (linkMode=2) safe-link sweep")
+            try:
+                summary["deep_phase2"] = await self.convert_zotfile_symlinks_async(
+                    dry_run, batch_size=50)
+            except Exception as e:
+                logger.error(f"Reconcile deep pass failed: {e}")
+                summary["errors"] += 1
+
+        # Step 7: advance version + persist (merged with the watcher's concurrent writes).
+        if not dry_run:
+            new_version = self.zotero_api.last_library_version
+            advance_to = self.state.last_library_version
+            if new_version and (since_version == 0 or new_version > since_version):
+                advance_to = new_version
+            self._save_state_merged(advance_to, pruned_keys)
+
+        logger.info(f"Reconcile complete: {summary}")
+        return summary
+
     async def run_interactive(self, dry_run=False):
         """Interactive mode: show menu, run selected phase, loop until quit."""
         print("\nFetching attachment data from Zotero API...")
@@ -3671,6 +3896,13 @@ def main():
     parser.add_argument('--zotdav-watch', action='store_true',
                         help='Run the zotdav inotify watcher continuously (server fast path): '
                              'sweep the backlog once, then migrate each new blob in real time.')
+    parser.add_argument('--reconcile', action='store_true',
+                        help='Server-safe API reconcile backstop for the zotdav watcher: '
+                             'metadata edits, linkMode=2 safe-linking, imported_url deletes, '
+                             'and deletion pruning. Never migrates/downloads stored blobs. '
+                             'Combine with --dry-run to preview, --deep for a full linkMode=2 sweep.')
+    parser.add_argument('--deep', action='store_true',
+                        help='With --reconcile: also run a full ZotFile (linkMode=2) safe-link sweep.')
 
     args = parser.parse_args()
 
@@ -3701,8 +3933,16 @@ def main():
 
     if args.zotdav_watch:
         from zotdav_watcher import ZotdavWatcher
-        watcher = ZotdavWatcher(service.zotdav_path,
-                                on_key=lambda k: service.process_zotdav_key(k, dry_run=False))
+        try:
+            resweep_sec = int(os.environ.get("DEVONZOT_RESWEEP_SEC", "1800"))
+        except ValueError:
+            resweep_sec = 1800
+        watcher = ZotdavWatcher(
+            service.zotdav_path,
+            on_key=lambda k: service.process_zotdav_key(k, dry_run=False),
+            on_interval=lambda: service.sweep_zotdav(dry_run=False),
+            interval_sec=resweep_sec,
+        )
 
         def _stop_watch(signum, frame):
             logger.info(f"Received signal {signum} — stopping zotdav watcher")
@@ -3713,6 +3953,14 @@ def main():
         logger.info(f"zotdav watch starting on {service.zotdav_path} (sweep-first, then real time)")
         watcher.run(sweep_first=True)  # drains backlog, then blocks watching until signalled
         logger.info("zotdav watch exited")
+        return
+
+    if args.reconcile:
+        summary = asyncio.run(service.reconcile(dry_run=args.dry_run, deep=args.deep))
+        mode = "DRY RUN" if args.dry_run else "LIVE"
+        print(f"\n=== reconcile ({mode}{', deep' if args.deep else ''}) ===")
+        for k, val in summary.items():
+            print(f"  {k}: {val}")
         return
 
     if args.zotdav_sweep:
