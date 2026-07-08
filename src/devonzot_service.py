@@ -3933,15 +3933,23 @@ def main():
 
     if args.zotdav_watch:
         from zotdav_watcher import ZotdavWatcher
+        from health_common import atomic_write_json
         try:
             resweep_sec = int(os.environ.get("DEVONZOT_RESWEEP_SEC", "1800"))
         except ValueError:
             resweep_sec = 1800
+        try:
+            beat_sec = int(os.environ.get("DEVONZOT_BEAT_SEC", "60"))
+        except ValueError:
+            beat_sec = 60
+        beat_file = DEVONZOT_PATH / 'var' / 'watch.beat'
         watcher = ZotdavWatcher(
             service.zotdav_path,
             on_key=lambda k: service.process_zotdav_key(k, dry_run=False),
             on_interval=lambda: service.sweep_zotdav(dry_run=False),
             interval_sec=resweep_sec,
+            on_beat=lambda: atomic_write_json(beat_file, {"beat_epoch": int(time.time())}),
+            beat_sec=beat_sec,
         )
 
         def _stop_watch(signum, frame):

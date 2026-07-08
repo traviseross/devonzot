@@ -1,74 +1,77 @@
 # DEVONzot — fleet-monitor rules (owned by the DEVONzot team)
 #
-# The ross-server fleet monitor pulls /Users/Shared/devonzot/health.json over ssh
-# (via: ssh, host: iMac) every ~15s and evaluates these rules against the snapshot
-# body. Hand this block to the HA team to merge under `services:` in fleet.yaml;
-# they restart fleet-monitor and it replaces the conservative starter they wrote.
+# WS7 (2026-07-08): DEVONzot's service moved from the iMac (launchd) to the Linux
+# server (systemd user units). This ruleset was REWRITTEN for the server health model —
+# the old iMac-shaped rules (gui_session_active, service_process_alive, seconds_since_sync)
+# no longer apply and would fire false "sync stopped" warnings against the disabled iMac.
 #
-# Emitter:  src/health_emitter.py        (fields it publishes)
-# Daemon:   config/com.devonzot.health.plist
-# See also: docs/INSTALL_LAUNCHD.md
+# The ross-server fleet monitor now reads a LOCAL snapshot the server emitter writes.
+# Hand this block to the HA team to REPLACE the old `via: ssh host: iMac` devonzot block
+# in /home/tradmin/ops/fleet_monitor/etc/fleet.yaml (remove the old one in the SAME change),
+# then restart fleet-monitor.
+#
+# Emitter:  src/health_emitter_server.py         (fields it publishes)
+# Units:    ops/devonzot-health.{service,timer}   (~60s tick)
+# Watcher:  ops/devonzot.service (--zotdav-watch); its inotify loop stamps var/watch.beat
+# Backstop: ops/devonzot-reconcile.timer (2h); advances state.last_reconcile
+# See also: ~/.claude/plans/proceed-unified-hollerith.md (WS7 plan + cutover sequencing)
 #
 # Design notes:
 #  - Everything is never-page (tier 2 digest / tier 3 info), matching HA's stance.
-#    Bump mcp_reachable to tier 1 if you ever want a real-time page for it.
-#  - `when_field`/`when_equals` gates keep a single logout from triple-firing
-#    (gui + mcp + stalled). If the ssh-path engine doesn't support gates, drop the
-#    two `when_*` lines — the rules still work, just noisier on a logout.
+#  - Source is `via: file` (local read on the server — the emitter writes the snapshot
+#    here, no ssh/port). NOTE: this host has no local sshd (`ssh localhost` -> connection
+#    refused), so the via:ssh-localhost fallback is NOT available. `via: file` needs the
+#    ~6-line handler in fleet_monitor.py app_probe (patch in the WS7 plan hand-off) —
+#    merge this block and that handler together, or the block falls through to docker-exec.
 
 devonzot:
   health:
-    via: ssh
-    host: iMac
-    path: /Users/Shared/devonzot/health.json
-    # Emitter ticks every 60s and the iMac is always-on (DEVONzot can't sync while
-    # it sleeps anyway), so >5m stale == genuinely not reporting. Keep at 300.
+    via: file
+    path: /home/tradmin/DEVONzot/var/health.json
+    # The health emitter ticks every 60s; >5m without a fresh snapshot == the emitter
+    # timer itself stopped (i.e. reporting is down). Keep at 300.
     max_stale_s: 300
 
   rules:
-    # ── sync fully stopped (root-cause signals) ───────────────────────────────
-    - { field: gui_session_active, equals: false, sustained_s: 900,
+    # ── real-time sync stopped (the authoritative server liveness signal) ──────
+    # The watcher runs as systemd --user devonzot.service; the emitter reports its
+    # `systemctl is-active` result. Replaces the iMac's gui/launchd-PID rules.
+    - { field: service_active, equals: false, sustained_s: 300,
         severity: warning, tier: 2,
-        reason: "DEVONzot: uid-501 logged out on the iMac — DEVONthink down, sync stopped; log back in" }
+        reason: "DEVONzot: watcher (systemd devonzot.service) not active — real-time Zotero->DEVONthink sync stopped" }
 
-    - { field: service_process_alive, equals: false, sustained_s: 300,
-        severity: warning, tier: 2,
-        reason: "DEVONzot: launchd service process dead — Zotero<->DEVONthink sync stopped" }
-
-    # ── degraded while still running (what 'the process is up' can't see) ──────
-    # THE signal from the 2026-06-29 incident: DEVONthink's HTTP MCP server on :8420
-    # was toggled off (enabling the Claude Code stdio interface disables it), so
-    # imports failed silently for ~6 days. Gated on a live GUI session so a logout
-    # (which also drops MCP) fires the gui rule above, not this one.
+    # ── DEVONthink unreachable (imports fail silently) ────────────────────────
+    # On the server, MCP is the iMac's DEVONthink over TLS. No gui gate — there is no
+    # GUI session on the server. The iMac is always-on, so unreachable == a real problem
+    # (iMac down/asleep, DEVONthink not running, or Settings>AI>MCP HTTP server off).
     - { field: mcp_reachable, equals: false, sustained_s: 900,
-        when_field: gui_session_active, when_equals: true,
         severity: warning, tier: 2,
-        reason: "DEVONzot: DEVONthink MCP unreachable on :8420 while logged in — re-enable Settings>AI>MCP (HTTP server)" }
+        reason: "DEVONzot: iMac DEVONthink MCP unreachable from the server — blob migrations will fail" }
 
     - { field: status, not_equals: ok, sustained_s: 600,
         severity: warning, tier: 2,
-        reason: "DEVONzot self-reports status != ok (a service cycle failed; restart_count > 0)" }
+        reason: "DEVONzot self-reports status != ok (app-level restart_count > 0)" }
 
-    # ── sync loop wedged though everything looks alive ────────────────────────
-    # seconds_since_sync tracks the poll HEARTBEAT (service_state.last_zotero_check),
-    # which advances on every completed poll — including no-op "no changes" polls —
-    # so a QUIET library (no Zotero traffic, normal overnight) stays fresh regardless
-    # of traffic. The fallback poll runs at least every 600s, so healthy stays under
-    # ~650s. >30m with MCP reachable means the poll loop has actually stopped or
-    # Zotero is unreachable — a stall service_process_alive can't catch. Gated on
-    # mcp_reachable so the mcp rule owns the MCP-down case instead of double-firing.
-    - { field: seconds_since_sync, above: 1800, sustained_s: 600,
-        when_field: mcp_reachable, when_equals: true,
+    # ── watcher event loop wedged though the process is up ────────────────────
+    # var/watch.beat is stamped every ~60s by the inotify loop itself (independent of
+    # Zotero traffic — a quiet library still beats). >5m stale means the loop stopped
+    # turning while the process is still alive — a stall `service_active` can't catch.
+    - { field: seconds_since_watch_beat, above: 300, sustained_s: 120,
         severity: warning, tier: 3,
-        reason: "DEVONzot: no completed sync poll in >30m despite MCP reachable — poll loop stalled or Zotero unreachable" }
+        reason: "DEVONzot: watcher inotify loop heartbeat stale >5m — event loop may be wedged" }
 
-    # ── stuck retry queues (secondary; catches non-MCP stalls) ────────────────
-    # Normal steady state is 0; items drop after 20 retries, so a sustained backlog
-    # is abnormal. 25 tolerates a legitimate migration burst.
-    - { field: pending_downloads, above: 25, sustained_s: 3600,
+    # ── reconcile backstop not running ────────────────────────────────────────
+    # The 2h reconcile timer advances state.last_reconcile. >3h absorbs the 2h interval
+    # + AccuracySec + a slow run (up to the 30m TimeoutStartSec); beyond that the timer
+    # or the reconcile itself has stopped.
+    - { field: seconds_since_reconcile, above: 10800, sustained_s: 600,
         severity: warning, tier: 3,
-        reason: "DEVONzot: download retry queue > 25 for >1h — attachments not landing in DEVONthink" }
+        reason: "DEVONzot: reconcile backstop hasn't completed in >3h — devonzot-reconcile.timer may be stuck" }
 
+    # ── stuck delete-retry queue (secondary) ──────────────────────────────────
+    # Normal steady state is 0; items drop after retries, so a sustained backlog is
+    # abnormal. 25 tolerates a legitimate migration burst. (pending_downloads is a
+    # mac-only polling concept — not emitted on the server.)
     - { field: pending_deletes, above: 25, sustained_s: 3600,
         severity: warning, tier: 3,
         reason: "DEVONzot: delete retry queue > 25 for >1h — Zotero deletions not completing" }

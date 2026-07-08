@@ -1,0 +1,19 @@
+# DEVONzot health timer — re-runs the health emitter every ~60s.
+#
+# Tight AccuracySec so beat/snapshot ages stay meaningful against the fleet monitor's
+# max_stale_s: 300. Persistent=false: a late health tick is worthless (a missed 60s
+# heartbeat should read as stale, not be back-filled).
+
+[Unit]
+Description=Run the DEVONzot health emitter every 60s
+Documentation=file:///home/tradmin/DEVONzot/ops/devonzot-health.service
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=60s
+AccuracySec=10s
+Persistent=false
+Unit=devonzot-health.service
+
+[Install]
+WantedBy=timers.target

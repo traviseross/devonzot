@@ -1,0 +1,29 @@
+# DEVONzot health emitter — systemd user oneshot (Linux server profile).
+#
+# Writes REPO/var/health.json (server health snapshot) for the ross-server fleet
+# monitor, which reads it locally (ops/fleet-rules.yaml: via: ssh host: localhost).
+# The Linux equivalent of the iMac's com.devonzot.health LaunchDaemon.
+#
+# Driven by devonzot-health.timer (~60s). Oneshot -> no SIGTERM concern.
+# DEVONZOT_PROFILE=server and the MCP endpoint come from %h/DEVONzot/.env via
+# python-dotenv, the same source the watcher + reconcile use.
+#
+# Install (disabled until the server health source is cut over — see the WS7 plan
+# ~/.claude/plans/proceed-unified-hollerith.md):
+#   cp ops/devonzot-health.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now devonzot-health.timer   # linger already on
+#
+# Logs: journalctl --user -u devonzot-health.service
+
+[Unit]
+Description=DEVONzot health emitter — writes var/health.json for the fleet monitor
+Documentation=file:///home/tradmin/DEVONzot/.claude/plans/proceed-unified-hollerith.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/DEVONzot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/DEVONzot/venv/bin/python %h/DEVONzot/src/health_emitter_server.py

@@ -32,6 +32,7 @@ load_dotenv(REPO / '.env')
 
 # DevonthinkMCP lives alongside this module in src/.
 from devonthink_mcp import DevonthinkMCP
+from health_common import probe as _probe, atomic_write_json
 
 STATE_FILE = REPO / 'service_state.json'
 PID_FILE = REPO / 'service.pid'
@@ -94,15 +95,6 @@ def _seconds_since_sync(state: dict):
     return int((datetime.now() - datetime.fromisoformat(ts)).total_seconds())
 
 
-def _probe(fn, default):
-    """Run a probe, swallowing any failure into `default` so one bad signal
-    never sinks the snapshot."""
-    try:
-        return fn()
-    except Exception:
-        return default
-
-
 def build_snapshot() -> dict:
     state = _probe(_load_state, {})
 
@@ -128,14 +120,8 @@ def build_snapshot() -> dict:
 
 
 def write_snapshot(snapshot: dict) -> None:
-    """Atomically write the snapshot world-readable (tmp + os.replace), matching
-    the service's own state-save pattern (devonzot_service.py:_save_state)."""
-    OUTPUT_DIR.mkdir(mode=0o755, parents=True, exist_ok=True)
-    tmp = OUTPUT_FILE.with_suffix('.json.tmp')
-    with open(tmp, 'w') as f:
-        json.dump(snapshot, f, indent=2)
-    os.chmod(tmp, 0o644)
-    os.replace(tmp, OUTPUT_FILE)
+    """Atomically write the snapshot world-readable — see health_common.atomic_write_json."""
+    atomic_write_json(OUTPUT_FILE, snapshot)
 
 
 def main() -> None:

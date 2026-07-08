@@ -51,3 +51,7 @@ tmp_extractions/
 # Test coverage
 htmlcov/
 .coverage
+
+# Health emitter runtime snapshots (server profile)
+var/health.json
+var/watch.beat

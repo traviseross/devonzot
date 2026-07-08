@@ -23,10 +23,17 @@ logger = logging.getLogger(__name__)
 
 class ZotdavWatcher:
     def __init__(self, zotdav_dir, on_key: Callable[[str], None], read_timeout_ms: int = 1000,
-                 on_interval: Optional[Callable[[], None]] = None, interval_sec: int = 1800):
+                 on_interval: Optional[Callable[[], None]] = None, interval_sec: int = 1800,
+                 on_beat: Optional[Callable[[], None]] = None, beat_sec: int = 60):
         self.zotdav_dir = Path(zotdav_dir)
         self.on_key = on_key
         self.read_timeout_ms = read_timeout_ms
+        # Liveness heartbeat: the inotify loop wakes every read_timeout_ms even with zero
+        # events, so calling on_beat on a throttle proves the loop is turning regardless
+        # of Zotero traffic — the health emitter reads it to detect a wedged watcher. It
+        # writes a SEPARATE file (not service_state.json) to avoid the two-writer race.
+        self.on_beat = on_beat
+        self.beat_sec = beat_sec
         # Periodic re-sweep hook: inotify only sees NEW completions, so a blob the
         # consumer skipped (e.g. endpoint blip -> skipped_no_endpoint) or that landed
         # while the process was down never re-fires. Calling on_interval every
@@ -76,11 +83,14 @@ class ZotdavWatcher:
 
         inotify = INotify()
         last_resweep = time.monotonic()
+        last_beat = time.monotonic()
         try:
             inotify.add_watch(str(self.zotdav_dir), flags.CLOSE_WRITE | flags.MOVED_TO)
             logger.info(f"zotdav watcher armed on {self.zotdav_dir}")
             if self.on_interval:
                 logger.info(f"zotdav periodic re-sweep every {self.interval_sec}s (self-heal misses)")
+            if self.on_beat:
+                logger.info(f"zotdav liveness heartbeat every {self.beat_sec}s")
             while not self._stop.is_set():
                 for event in inotify.read(timeout=self.read_timeout_ms):
                     key = self.key_if_ready(event.name)
@@ -90,6 +100,13 @@ class ZotdavWatcher:
                             self.on_key(key)
                         except Exception as e:  # never let a consumer error kill the loop
                             logger.error(f"zotdav on_key({key}) failed: {e}")
+                # Liveness heartbeat — OUTSIDE the event loop so a quiet library still beats.
+                if self.on_beat and (time.monotonic() - last_beat) >= self.beat_sec:
+                    last_beat = time.monotonic()
+                    try:
+                        self.on_beat()
+                    except Exception as e:  # a heartbeat failure must not kill the loop
+                        logger.error(f"zotdav heartbeat failed: {e}")
                 # Periodic re-sweep between reads (drains any skipped/missed blobs).
                 if self.on_interval and (time.monotonic() - last_resweep) >= self.interval_sec:
                     last_resweep = time.monotonic()
