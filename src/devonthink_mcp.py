@@ -16,11 +16,15 @@ runs inside DEVONthink on the same Mac, so calls are local and fast.
 
 import os
 import re
+import ssl
 import json
+import socket
 import hashlib
 import logging
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
+from urllib.request import urlopen
 
 import certifi
 import requests
@@ -32,21 +36,91 @@ PROTOCOL_VERSION = "2025-03-26"
 
 _CERT_RE = re.compile(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", re.S)
 
+# id-ad-caIssuers (OID 1.3.6.1.5.5.7.48.2), DER-encoded as it sits inside an
+# AuthorityInfoAccess AccessDescription — the marker for "where to fetch my issuer".
+_CA_ISSUERS_OID = bytes.fromhex("06082b06010505073002")
 
-def _build_ca_bundle(cacert_path):
+
+def _aia_ca_issuers_url(der):
+    """Pull the CA-Issuers (AIA) URL out of a DER certificate without a crypto lib.
+
+    Each AccessDescription in the AuthorityInfoAccess extension is the access-method
+    OID followed by the access-location GeneralName; for CA-Issuers that location is a
+    [6] uniformResourceIdentifier (tag 0x86) holding the HTTP URL of the issuing
+    intermediate. We scan for the caIssuers OID and read the short-form IA5String that
+    follows. Returns None if absent (or a long-form length we don't need to handle —
+    LE's AIA URLs are ~25 bytes).
+    """
+    i = der.find(_CA_ISSUERS_OID)
+    if i < 0:
+        return None
+    j = i + len(_CA_ISSUERS_OID)
+    if j + 1 >= len(der) or der[j] != 0x86:      # expect [6] URI, short-form length
+        return None
+    length = der[j + 1]
+    if length & 0x80 or j + 2 + length > len(der):
+        return None
+    return der[j + 2 : j + 2 + length].decode("ascii", "replace")
+
+
+def _fetch_leaf_intermediate(url, timeout=8):
+    """Follow the served leaf's own AIA pointer to fetch its issuing intermediate, live.
+
+    DEVONthink 4 serves its leaf certificate only, and Let's Encrypt rotates which
+    intermediate signs each renewal — so any *stored* intermediate eventually goes
+    stale (this is the whole failure mode). Instead we peek at whatever leaf the
+    endpoint is serving right now (an unverified read — we inspect the cert, we don't
+    trust the channel), follow that leaf's AIA URL to fetch its intermediate straight
+    from the CA, and cache it keyed by URL. Intermediates are stable per URL, so a
+    cache hit is never stale; a rotation changes the URL and misses. Returns PEM text,
+    or None on any failure (caller falls back to certifi + the pinned chain).
+    """
+    p = urlparse(url)
+    host, port = p.hostname, (p.port or 443)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE                # we only need to READ the leaf
+    with socket.create_connection((host, port), timeout=timeout) as raw:
+        with ctx.wrap_socket(raw, server_hostname=host) as tls:
+            der = tls.getpeercert(binary_form=True)
+    aia = _aia_ca_issuers_url(der)
+    if not aia:
+        return None
+    cache = (Path(tempfile.gettempdir())
+             / f"devonzot_le_int_{hashlib.sha256(aia.encode()).hexdigest()[:16]}.pem")
+    if cache.exists():
+        return cache.read_text()
+    with urlopen(aia, timeout=timeout) as r:       # AIA host comes from the cert itself
+        pem = ssl.DER_cert_to_PEM_cert(r.read())
+    cache.write_text(pem)
+    return pem
+
+
+def _build_ca_bundle(cacert_path, url=None, timeout=8):
     """Return a path to a verify bundle for a leaf-only TLS endpoint.
 
     DEVONthink's MCP server presents its leaf certificate only (no intermediate),
-    so pointing `requests` at the delivered fullchain.pem fails to build a trust
-    chain ('unable to get issuer certificate'). The fix: trust the system roots
-    (certifi — has the ISRG roots) PLUS the intermediate(s) from the delivered
-    chain (everything after the leaf). Rebuilt from the current fullchain, so a
-    daily cert renewal is picked up automatically; the output file is named by a
-    content hash so we don't churn or leak temp files across restarts.
+    so `requests` can't build a chain from the handshake alone ('unable to get
+    issuer certificate'). We trust the permanent ISRG roots (via certifi) and
+    supply the missing intermediate ourselves. The authoritative source is the
+    *live* leaf's own AIA pointer (see _fetch_leaf_intermediate): whatever cert the
+    Mac is serving — freshly renewed or months stale, signed by any LE intermediate
+    — we follow the leaf to its issuer and fetch it, so there is nothing stored to
+    go stale. The intermediate(s) baked into the pinned fullchain are folded in too,
+    as a fallback for when the endpoint isn't reachable at build time. The output
+    file is named by a content hash so we don't churn or leak temp files.
     """
-    text = Path(cacert_path).read_text()
-    certs = _CERT_RE.findall(text)
-    intermediates = certs[1:] if len(certs) > 1 else certs  # drop the leaf
+    intermediates = []
+    if cacert_path and Path(cacert_path).exists():
+        certs = _CERT_RE.findall(Path(cacert_path).read_text())
+        intermediates = certs[1:] if len(certs) > 1 else certs  # drop the leaf
+    if url and url.lower().startswith("https"):
+        try:
+            live = _fetch_leaf_intermediate(url, timeout)
+            if live and live.strip() not in intermediates:
+                intermediates.append(live.strip())
+        except Exception as e:
+            logger.debug("live AIA intermediate fetch failed for %s: %s", url, e)
     bundle = certifi.contents().rstrip() + "\n" + "\n".join(intermediates) + "\n"
     digest = hashlib.sha256(bundle.encode()).hexdigest()[:16]
     out = Path(tempfile.gettempdir()) / f"devonzot_ca_{digest}.pem"
@@ -74,8 +148,8 @@ class DevonthinkMCP:
         # TLS: a remote LAN endpoint delivers a fullchain.pem (leaf-only handshake);
         # build a proper verify bundle from it. Local http/localhost needs nothing.
         cacert = cacert or os.environ.get("DEVONTHINK_MCP_CACERT")
-        if cacert:
-            self.session.verify = _build_ca_bundle(cacert)
+        if cacert or self.url.lower().startswith("https"):
+            self.session.verify = _build_ca_bundle(cacert, self.url)
         self._id = 0
         self._session_id = None
         self._initialized = False

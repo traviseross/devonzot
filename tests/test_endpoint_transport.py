@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import devonzot_service as dz
 from devonzot_service import DEVONthinkMCPInterface, MCPEndpoint, _parse_mcp_endpoints
-from devonthink_mcp import _build_ca_bundle
+from devonthink_mcp import _build_ca_bundle, _aia_ca_issuers_url, _CA_ISSUERS_OID
 
 
 class FakeClient:
@@ -160,8 +160,21 @@ def test_build_ca_bundle_drops_leaf_keeps_intermediate_and_roots(tmp_path):
     intermediate = "-----BEGIN CERTIFICATE-----\nINTERMEDIATEDATA\n-----END CERTIFICATE-----"
     full = tmp_path / "fullchain.pem"
     full.write_text(leaf + "\n" + intermediate + "\n")
-    bundle_path = _build_ca_bundle(str(full))
+    bundle_path = _build_ca_bundle(str(full))    # url=None => no live fetch, offline-safe
     content = Path(bundle_path).read_text()
     assert "INTERMEDIATEDATA" in content      # intermediate supplied (server sends leaf-only)
     assert "LEAFDATA" not in content          # leaf dropped
     assert "BEGIN CERTIFICATE" in content and len(content) > 1000  # certifi roots included
+
+
+def test_aia_ca_issuers_url_extracted_from_der():
+    # A CA-Issuers AccessDescription: the caIssuers OID, then a [6] URI (tag 0x86)
+    # short-form-length-prefixed IA5String. This is how DT4's LE leaf points at its
+    # issuing intermediate, which we follow live so a rotated intermediate is never stale.
+    url = b"http://ye2.i.lencr.org/"
+    der = b"\x30\x82garbage" + _CA_ISSUERS_OID + bytes([0x86, len(url)]) + url + b"trailing"
+    assert _aia_ca_issuers_url(der) == "http://ye2.i.lencr.org/"
+
+
+def test_aia_ca_issuers_url_absent_returns_none():
+    assert _aia_ca_issuers_url(b"no aia extension here at all") is None
