@@ -518,9 +518,9 @@ class TestCreateDevonthinkChildLink:
         assert mock_zotero_client.create_url_attachments.call_count == 2
         created = {c[0][0][0]['url']: c[0][0][0]['title']
                    for c in mock_zotero_client.create_url_attachments.call_args_list}
-        # Both schemes, identical UUID; titles distinguish them in Zotero's list.
-        assert created['x-devonthink-item://AE4B8D62-D13F-4FD9-929E-7BEA0C6DC268'] == 'Smith - Book - 2020 - Book'
-        assert created['x-palimpsest-item://AE4B8D62-D13F-4FD9-929E-7BEA0C6DC268'] == 'Read in Palimpsest'
+        # Both schemes, identical UUID; "{App}: {name}" titles distinguish them in Zotero's list.
+        assert created['x-devonthink-item://AE4B8D62-D13F-4FD9-929E-7BEA0C6DC268'] == 'DEVONthink: Smith - Book - 2020 - Book'
+        assert created['x-palimpsest-item://AE4B8D62-D13F-4FD9-929E-7BEA0C6DC268'] == 'Palimpsest: Smith - Book - 2020 - Book'
 
     def test_non_epub_gets_only_devonthink_link(self, service_with_mocks, mock_zotero_client):
         """Non-EPUB items get exactly one DEVONthink link — no Palimpsest child."""
@@ -561,17 +561,18 @@ class TestCreateDevonthinkChildLink:
 
         assert result is True
         mock_zotero_client.create_url_attachments.assert_called_once()
-        url = mock_zotero_client.create_url_attachments.call_args[0][0][0]['url']
-        assert url == 'x-palimpsest-item://AE4B8D62-D13F-4FD9-929E-7BEA0C6DC268'
+        created = mock_zotero_client.create_url_attachments.call_args[0][0][0]
+        assert created['url'] == 'x-palimpsest-item://AE4B8D62-D13F-4FD9-929E-7BEA0C6DC268'
+        assert created['title'] == 'Palimpsest: Smith - Book - 2020 - Book'
 
     def test_epub_idempotent_when_both_links_exist(self, service_with_mocks, mock_zotero_client):
         """EPUB already carrying BOTH links is left untouched (no duplicate per cycle)."""
         uuid = 'AE4B8D62-D13F-4FD9-929E-7BEA0C6DC268'
         mock_zotero_client._get_all_attachments_cached = Mock(return_value=[
             {'key': 'DT', 'data': {'linkMode': 'linked_url', 'parentItem': 'ITEM123',
-                                   'url': f'x-devonthink-item://{uuid}', 'title': 'Smith - Book'}},
+                                   'url': f'x-devonthink-item://{uuid}', 'title': 'DEVONthink: Smith - Book'}},
             {'key': 'PAL', 'data': {'linkMode': 'linked_url', 'parentItem': 'ITEM123',
-                                    'url': f'x-palimpsest-item://{uuid}', 'title': 'Read in Palimpsest'}},
+                                    'url': f'x-palimpsest-item://{uuid}', 'title': 'Palimpsest: Smith - Book'}},
         ])
 
         result = service_with_mocks._create_devonthink_child_link(

@@ -83,9 +83,14 @@ DEVONTHINK_GLOBAL_INBOX = "Global Inbox"
 DEVONTHINK_LINK_SCHEME = "x-devonthink-item"
 PALIMPSEST_LINK_SCHEME = "x-palimpsest-item"
 KNOWN_LINK_SCHEMES = (DEVONTHINK_LINK_SCHEME, PALIMPSEST_LINK_SCHEME)
-# Child-link title for the Palimpsest link, so it's visibly distinct from the DEVONthink
-# link in Zotero's attachment list (the DEVONthink link keeps the document name).
-PALIMPSEST_LINK_TITLE = "Read in Palimpsest"
+# App names used as a title prefix on an EPUB's two links, so the two apps are
+# distinguishable in Zotero's attachment list: "DEVONthink: <name>" / "Palimpsest: <name>",
+# where <name> is the DEVONthink record name. Maps scheme → app label.
+DEVONTHINK_APP_NAME = "DEVONthink"
+PALIMPSEST_APP_NAME = "Palimpsest"
+LINK_APP_NAMES = {DEVONTHINK_LINK_SCHEME: DEVONTHINK_APP_NAME, PALIMPSEST_LINK_SCHEME: PALIMPSEST_APP_NAME}
+# Legacy generic placeholder titles recognized (and auto-upgraded) when re-touching a link.
+GENERIC_LINK_TITLES = ("DEVONthink Link", "Palimpsest Link", "Read in Palimpsest")
 # zotdav fast-path store (server profile). The Zotero WebDAV file-sync target: each
 # stored attachment appears here as {KEY}.zip + {KEY}.prop. Empty/unused on mac profile.
 ZOTDAV_PATH = os.environ.get("ZOTDAV_PATH", "/media/external/zotdav/data/zotero")
@@ -1634,8 +1639,7 @@ class DEVONzotService:
         existing = self._find_child_link_by_scheme(parent_key, scheme)
         if existing:
             existing_data = existing.get('data', {})
-            generic_titles = ("DEVONthink Link", "Palimpsest Link", PALIMPSEST_LINK_TITLE)
-            if existing_data.get('title') in generic_titles and title not in generic_titles:
+            if existing_data.get('title') in GENERIC_LINK_TITLES and title not in GENERIC_LINK_TITLES:
                 att_key = existing_data.get('key')
                 version = existing_data.get('version', 0)
                 if not dry_run:
@@ -1677,15 +1681,17 @@ class DEVONzotService:
                                        dry_run=False, is_epub: bool = False) -> bool:
         """Ensure the parent's UUID callback link(s) exist in Zotero.
 
-        Every item gets a DEVONthink link (x-devonthink-item://). EPUBs ALSO get a
-        Palimpsest link (x-palimpsest-item://, same UUID) as a SECOND linked_url child, so
-        a click can open the book in either app. Both are idempotent per scheme.
+        Non-EPUBs get one DEVONthink link (x-devonthink-item://) titled `title` (the record
+        name). EPUBs get BOTH links as separate children, each titled "{App}: {title}"
+        ("DEVONthink: <name>" / "Palimpsest: <name>") so the two apps are distinguishable in
+        Zotero's attachment list. `title` is the DEVONthink record name. Idempotent per scheme.
         """
-        ok = self._ensure_child_link(parent_key, dt_uuid, DEVONTHINK_LINK_SCHEME, title, dry_run)
-        if is_epub:
-            ok = self._ensure_child_link(
-                parent_key, dt_uuid, PALIMPSEST_LINK_SCHEME, PALIMPSEST_LINK_TITLE, dry_run
-            ) and ok
+        if not is_epub:
+            return self._ensure_child_link(parent_key, dt_uuid, DEVONTHINK_LINK_SCHEME, title, dry_run)
+        ok = self._ensure_child_link(
+            parent_key, dt_uuid, DEVONTHINK_LINK_SCHEME, f"{DEVONTHINK_APP_NAME}: {title}", dry_run)
+        ok = self._ensure_child_link(
+            parent_key, dt_uuid, PALIMPSEST_LINK_SCHEME, f"{PALIMPSEST_APP_NAME}: {title}", dry_run) and ok
         return ok
 
     def delete_imported_url_attachments(self, dry_run=False, interactive=False) -> Dict[str, int]:
