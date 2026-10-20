@@ -498,8 +498,52 @@ class TestCreateDevonthinkChildLink:
             dt_uuid='new-uuid',
             dry_run=False
         )
-        
+
         assert result is False
+
+    def test_creates_palimpsest_link_for_epub(self, service_with_mocks, mock_zotero_client):
+        """is_epub=True emits an x-palimpsest-item:// link (same UUID) titled 'Palimpsest Link'."""
+        mock_zotero_client._get_all_attachments_cached = Mock(return_value=[])
+        mock_zotero_client.create_url_attachments = Mock(return_value=[
+            {'new_key': 'NEW_ATTACH_EPUB'}
+        ])
+
+        result = service_with_mocks._create_devonthink_child_link(
+            parent_key='ITEM123',
+            dt_uuid='AE4B8D62-D13F-4FD9-929E-7BEA0C6DC268',
+            dry_run=False,
+            is_epub=True,
+        )
+
+        assert result is True
+        attachment_data = mock_zotero_client.create_url_attachments.call_args[0][0]
+        # Only the scheme changes — UUID stays byte-for-byte identical, no x-devonthink-item://
+        assert attachment_data[0]['url'] == 'x-palimpsest-item://AE4B8D62-D13F-4FD9-929E-7BEA0C6DC268'
+        assert attachment_data[0]['title'] == 'Palimpsest Link'
+
+    def test_dedup_recognizes_existing_palimpsest_link(self, service_with_mocks, mock_zotero_client):
+        """A parent already carrying a Palimpsest link is NOT re-linked (no duplicate per cycle)."""
+        mock_zotero_client._get_all_attachments_cached = Mock(return_value=[
+            {
+                'key': 'EXISTING_EPUB_LINK',
+                'data': {
+                    'linkMode': 'linked_url',
+                    'parentItem': 'ITEM123',
+                    'url': 'x-palimpsest-item://AE4B8D62-D13F-4FD9-929E-7BEA0C6DC268',
+                    'title': 'Palimpsest Link',
+                }
+            }
+        ])
+
+        result = service_with_mocks._create_devonthink_child_link(
+            parent_key='ITEM123',
+            dt_uuid='AE4B8D62-D13F-4FD9-929E-7BEA0C6DC268',
+            dry_run=False,
+            is_epub=True,
+        )
+
+        assert result is True
+        service_with_mocks.zotero_api.create_url_attachments.assert_not_called()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

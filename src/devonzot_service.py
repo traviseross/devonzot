@@ -72,6 +72,16 @@ DEVONTHINK_INBOX_PATH = os.environ.get(
 )
 DEVONTHINK_DATABASE = "Professional"
 DEVONTHINK_GLOBAL_INBOX = "Global Inbox"
+# UUID-link callback schemes written into Zotero. Both carry the *same* DEVONthink UUID
+# byte-for-byte; only the scheme differs, picking which app a click lands in.
+#   - PDFs / everything else → DEVONthink (x-devonthink-item://)
+#   - EPUBs → Palimpsest (x-palimpsest-item://), a thin redirect that asks DEVONthink to
+#     resolve the same UUID and opens the book in Palimpsest for reading/annotation.
+# Forward convention only — existing links are not retrofitted. The dedup guard must know
+# BOTH schemes so an already-linked EPUB isn't re-linked every cycle.
+DEVONTHINK_LINK_SCHEME = "x-devonthink-item"
+PALIMPSEST_LINK_SCHEME = "x-palimpsest-item"
+KNOWN_LINK_SCHEMES = (DEVONTHINK_LINK_SCHEME, PALIMPSEST_LINK_SCHEME)
 # zotdav fast-path store (server profile). The Zotero WebDAV file-sync target: each
 # stored attachment appears here as {KEY}.zip + {KEY}.prop. Empty/unused on mac profile.
 ZOTDAV_PATH = os.environ.get("ZOTDAV_PATH", "/media/external/zotdav/data/zotero")
@@ -1529,6 +1539,15 @@ class DEVONzotService:
             return Path(attachment.path).name
         return None
 
+    def _attachment_is_epub(self, attachment: ZoteroAttachment) -> bool:
+        """True if the attachment's source file is an EPUB.
+
+        Keyed on the real attachment filename/path extension — NOT the generated
+        link title, which carries no extension. Drives the Palimpsest link scheme.
+        """
+        name = self._get_zotero_filename(attachment)
+        return bool(name) and Path(name).suffix.lower() == '.epub'
+
     def _find_or_adopt_in_devonthink(self, generated_name: str,
                                       zotero_filename: Optional[str],
                                       dry_run=False) -> Optional[str]:
@@ -1568,13 +1587,18 @@ class DEVONzotService:
         return None
 
     def _find_devonthink_link(self, parent_key: str) -> Optional[dict]:
-        """Find existing linked_url child with x-devonthink-item:// URL."""
+        """Find existing linked_url child with a DEVONthink/Palimpsest UUID URL.
+
+        Matches both the x-devonthink-item:// and x-palimpsest-item:// schemes so an
+        EPUB already carrying a Palimpsest link is recognized as linked (not re-linked).
+        """
         all_attachments = self.zotero_api._get_all_attachments_cached()
         for api_item in all_attachments:
             data = api_item.get('data', {})
+            url = data.get('url', '') or ''
             if (data.get('parentItem') == parent_key
                     and data.get('linkMode') == 'linked_url'
-                    and (data.get('url', '') or '').startswith('x-devonthink-item://')):
+                    and any(url.startswith(f'{s}://') for s in KNOWN_LINK_SCHEMES)):
                 return api_item
         return None
 
@@ -1584,16 +1608,23 @@ class DEVONzotService:
 
     def _create_devonthink_child_link(self, parent_key: str, dt_uuid: str,
                                        title: str = "DEVONthink Link",
-                                       dry_run=False) -> bool:
-        """Create a linked_url child attachment with x-devonthink-item:// URL.
+                                       dry_run=False, is_epub: bool = False) -> bool:
+        """Create a linked_url child attachment with a UUID callback URL.
 
-        Checks for duplicates before creating. Renames existing links if still
-        using the generic "DEVONthink Link" title.
+        PDFs/other → x-devonthink-item://; EPUBs (is_epub=True) → x-palimpsest-item://.
+        The UUID is identical either way — only the scheme (and the generic title) differ.
+        Checks for duplicates before creating (both schemes). Renames existing links if
+        still using the generic default title.
         """
+        scheme = PALIMPSEST_LINK_SCHEME if is_epub else DEVONTHINK_LINK_SCHEME
+        default_title = "Palimpsest Link" if is_epub else "DEVONthink Link"
+        if title == "DEVONthink Link" and is_epub:
+            title = default_title
         existing = self._find_devonthink_link(parent_key)
         if existing:
             existing_data = existing.get('data', {})
-            if existing_data.get('title') == "DEVONthink Link" and title != "DEVONthink Link":
+            generic_titles = ("DEVONthink Link", "Palimpsest Link")
+            if existing_data.get('title') in generic_titles and title not in generic_titles:
                 att_key = existing_data.get('key')
                 version = existing_data.get('version', 0)
                 if not dry_run:
@@ -1614,13 +1645,13 @@ class DEVONzotService:
             return True
 
         if dry_run:
-            logger.info(f"[DRY RUN] Would create DEVONthink Link child for {parent_key}")
+            logger.info(f"[DRY RUN] Would create {default_title} child for {parent_key}")
             return True
 
         results = self.zotero_api.create_url_attachments([{
             "parent_key": parent_key,
             "title": title,
-            "url": f"x-devonthink-item://{dt_uuid}"
+            "url": f"{scheme}://{dt_uuid}"
         }])
 
         if results and results[0].get('new_key'):
@@ -2294,8 +2325,8 @@ class DEVONzotService:
                     logger.info(f"📎 Found {attachment.key} in DEVONthink (not on disk) → {dt_uuid}")
 
                 if dt_uuid:
-                    # Create linked_url child attachment with DEVONthink link
-                    if self._create_devonthink_child_link(attachment.parent_key, dt_uuid, title=filename, dry_run=dry_run):
+                    # Create linked_url child attachment (Palimpsest scheme for EPUBs)
+                    if self._create_devonthink_child_link(attachment.parent_key, dt_uuid, title=filename, dry_run=dry_run, is_epub=self._attachment_is_epub(attachment)):
                         # Update DEVONthink metadata
                         if self.devonthink.update_item_metadata(dt_uuid, parent_item, dry_run):
                             results['success'] += 1
@@ -2523,8 +2554,8 @@ class DEVONzotService:
             logger.info(f"📎 Found {attachment.key} in DEVONthink (not on disk) → {dt_uuid}")
 
         if dt_uuid:
-            # Create linked_url child attachment with DEVONthink link
-            if self._create_devonthink_child_link(attachment.parent_key, dt_uuid, title=filename, dry_run=dry_run):
+            # Create linked_url child attachment (Palimpsest scheme for EPUBs)
+            if self._create_devonthink_child_link(attachment.parent_key, dt_uuid, title=filename, dry_run=dry_run, is_epub=self._attachment_is_epub(attachment)):
                 # Update DEVONthink metadata
                 if self.devonthink.update_item_metadata(dt_uuid, parent_item, dry_run):
                     result['result'] = 'success'
@@ -3237,19 +3268,25 @@ class DEVONzotService:
         """Push a changed parent's metadata to its already-migrated DEVONthink record.
 
         Safe: no files, no deletes. Finds the parent's linked_url child, extracts the
-        UUID from its x-devonthink-item://UUID url, and reuses update_item_metadata.
+        UUID from its x-devonthink-item:// or x-palimpsest-item:// url (same UUID either
+        way), and reuses update_item_metadata.
 
         Uses a TARGETED children fetch (one request) rather than _find_devonthink_link's
         full-library attachment scan — on the server's 2s rate limit that scan costs
         ~100 requests and would dominate every run.
         """
-        prefix = 'x-devonthink-item://'
         uuid = None
         for child in self.zotero_api.get_item_children(parent_key):
             data = child.get('data', {})
             child_url = (data.get('url', '') or '')
-            if data.get('linkMode') == 'linked_url' and child_url.startswith(prefix):
-                uuid = child_url[len(prefix):].strip()
+            if data.get('linkMode') != 'linked_url':
+                continue
+            for scheme in KNOWN_LINK_SCHEMES:
+                prefix = f'{scheme}://'
+                if child_url.startswith(prefix):
+                    uuid = child_url[len(prefix):].strip()
+                    break
+            if uuid:
                 break
         if not uuid:
             summary["skipped"] += 1

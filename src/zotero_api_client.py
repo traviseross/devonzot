@@ -300,9 +300,11 @@ class ZoteroAPIClient:
             if item_key in processed:
                 continue
 
-            # Also skip if parent URL still has legacy DEVONthink link
+            # Also skip if parent URL still has a legacy DEVONthink/Palimpsest link.
+            # (Schemes mirror devonzot_service.KNOWN_LINK_SCHEMES; inlined here to keep
+            # this lower-layer client free of a circular import.)
             url = data.get('url', '') or ''
-            if url.startswith('x-devonthink-item://'):
+            if url.startswith('x-devonthink-item://') or url.startswith('x-palimpsest-item://'):
                 continue
 
             result.append(self._api_item_to_zotero_item(api_item))
