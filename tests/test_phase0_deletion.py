@@ -501,45 +501,81 @@ class TestCreateDevonthinkChildLink:
 
         assert result is False
 
-    def test_creates_palimpsest_link_for_epub(self, service_with_mocks, mock_zotero_client):
-        """is_epub=True emits an x-palimpsest-item:// link (same UUID) titled 'Palimpsest Link'."""
+    def test_epub_gets_both_links(self, service_with_mocks, mock_zotero_client):
+        """is_epub=True creates BOTH a DEVONthink and a Palimpsest child (same UUID)."""
         mock_zotero_client._get_all_attachments_cached = Mock(return_value=[])
-        mock_zotero_client.create_url_attachments = Mock(return_value=[
-            {'new_key': 'NEW_ATTACH_EPUB'}
-        ])
+        mock_zotero_client.create_url_attachments = Mock(return_value=[{'new_key': 'NEW'}])
 
         result = service_with_mocks._create_devonthink_child_link(
             parent_key='ITEM123',
             dt_uuid='AE4B8D62-D13F-4FD9-929E-7BEA0C6DC268',
+            title='Smith - Book - 2020 - Book',
             dry_run=False,
             is_epub=True,
         )
 
         assert result is True
-        attachment_data = mock_zotero_client.create_url_attachments.call_args[0][0]
-        # Only the scheme changes — UUID stays byte-for-byte identical, no x-devonthink-item://
-        assert attachment_data[0]['url'] == 'x-palimpsest-item://AE4B8D62-D13F-4FD9-929E-7BEA0C6DC268'
-        assert attachment_data[0]['title'] == 'Palimpsest Link'
+        assert mock_zotero_client.create_url_attachments.call_count == 2
+        created = {c[0][0][0]['url']: c[0][0][0]['title']
+                   for c in mock_zotero_client.create_url_attachments.call_args_list}
+        # Both schemes, identical UUID; titles distinguish them in Zotero's list.
+        assert created['x-devonthink-item://AE4B8D62-D13F-4FD9-929E-7BEA0C6DC268'] == 'Smith - Book - 2020 - Book'
+        assert created['x-palimpsest-item://AE4B8D62-D13F-4FD9-929E-7BEA0C6DC268'] == 'Read in Palimpsest'
 
-    def test_dedup_recognizes_existing_palimpsest_link(self, service_with_mocks, mock_zotero_client):
-        """A parent already carrying a Palimpsest link is NOT re-linked (no duplicate per cycle)."""
+    def test_non_epub_gets_only_devonthink_link(self, service_with_mocks, mock_zotero_client):
+        """Non-EPUB items get exactly one DEVONthink link — no Palimpsest child."""
+        mock_zotero_client._get_all_attachments_cached = Mock(return_value=[])
+        mock_zotero_client.create_url_attachments = Mock(return_value=[{'new_key': 'NEW'}])
+
+        result = service_with_mocks._create_devonthink_child_link(
+            parent_key='ITEM123', dt_uuid='pdf-uuid', dry_run=False, is_epub=False,
+        )
+
+        assert result is True
+        mock_zotero_client.create_url_attachments.assert_called_once()
+        url = mock_zotero_client.create_url_attachments.call_args[0][0][0]['url']
+        assert url == 'x-devonthink-item://pdf-uuid'
+
+    def test_epub_adds_only_missing_scheme(self, service_with_mocks, mock_zotero_client):
+        """EPUB with a DEVONthink link but no Palimpsest link gets ONLY the Palimpsest one."""
         mock_zotero_client._get_all_attachments_cached = Mock(return_value=[
             {
-                'key': 'EXISTING_EPUB_LINK',
+                'key': 'EXISTING_DT_LINK',
                 'data': {
                     'linkMode': 'linked_url',
                     'parentItem': 'ITEM123',
-                    'url': 'x-palimpsest-item://AE4B8D62-D13F-4FD9-929E-7BEA0C6DC268',
-                    'title': 'Palimpsest Link',
+                    'url': 'x-devonthink-item://AE4B8D62-D13F-4FD9-929E-7BEA0C6DC268',
+                    'title': 'Smith - Book - 2020 - Book',
                 }
             }
         ])
+        mock_zotero_client.create_url_attachments = Mock(return_value=[{'new_key': 'NEW'}])
 
         result = service_with_mocks._create_devonthink_child_link(
             parent_key='ITEM123',
             dt_uuid='AE4B8D62-D13F-4FD9-929E-7BEA0C6DC268',
+            title='Smith - Book - 2020 - Book',
             dry_run=False,
             is_epub=True,
+        )
+
+        assert result is True
+        mock_zotero_client.create_url_attachments.assert_called_once()
+        url = mock_zotero_client.create_url_attachments.call_args[0][0][0]['url']
+        assert url == 'x-palimpsest-item://AE4B8D62-D13F-4FD9-929E-7BEA0C6DC268'
+
+    def test_epub_idempotent_when_both_links_exist(self, service_with_mocks, mock_zotero_client):
+        """EPUB already carrying BOTH links is left untouched (no duplicate per cycle)."""
+        uuid = 'AE4B8D62-D13F-4FD9-929E-7BEA0C6DC268'
+        mock_zotero_client._get_all_attachments_cached = Mock(return_value=[
+            {'key': 'DT', 'data': {'linkMode': 'linked_url', 'parentItem': 'ITEM123',
+                                   'url': f'x-devonthink-item://{uuid}', 'title': 'Smith - Book'}},
+            {'key': 'PAL', 'data': {'linkMode': 'linked_url', 'parentItem': 'ITEM123',
+                                    'url': f'x-palimpsest-item://{uuid}', 'title': 'Read in Palimpsest'}},
+        ])
+
+        result = service_with_mocks._create_devonthink_child_link(
+            parent_key='ITEM123', dt_uuid=uuid, title='Smith - Book', dry_run=False, is_epub=True,
         )
 
         assert result is True

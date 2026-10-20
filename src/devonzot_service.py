@@ -72,16 +72,20 @@ DEVONTHINK_INBOX_PATH = os.environ.get(
 )
 DEVONTHINK_DATABASE = "Professional"
 DEVONTHINK_GLOBAL_INBOX = "Global Inbox"
-# UUID-link callback schemes written into Zotero. Both carry the *same* DEVONthink UUID
-# byte-for-byte; only the scheme differs, picking which app a click lands in.
-#   - PDFs / everything else → DEVONthink (x-devonthink-item://)
-#   - EPUBs → Palimpsest (x-palimpsest-item://), a thin redirect that asks DEVONthink to
-#     resolve the same UUID and opens the book in Palimpsest for reading/annotation.
-# Forward convention only — existing links are not retrofitted. The dedup guard must know
-# BOTH schemes so an already-linked EPUB isn't re-linked every cycle.
+# UUID-link callback schemes written into Zotero as linked_url children. Both carry the
+# *same* DEVONthink UUID byte-for-byte; only the scheme differs, picking which app a click
+# lands in. x-palimpsest-item:// is a thin redirect that asks DEVONthink to resolve the UUID
+# and opens the book in Palimpsest for reading/annotation.
+#   - PDFs / everything else → one DEVONthink link (x-devonthink-item://).
+#   - EPUBs → BOTH links as two separate children: the DEVONthink link AND a Palimpsest
+#     link, so a click can open the book in either app (Zotero holds both happily).
+# Link creation is idempotent per scheme, so an already-linked item isn't re-linked each cycle.
 DEVONTHINK_LINK_SCHEME = "x-devonthink-item"
 PALIMPSEST_LINK_SCHEME = "x-palimpsest-item"
 KNOWN_LINK_SCHEMES = (DEVONTHINK_LINK_SCHEME, PALIMPSEST_LINK_SCHEME)
+# Child-link title for the Palimpsest link, so it's visibly distinct from the DEVONthink
+# link in Zotero's attachment list (the DEVONthink link keeps the document name).
+PALIMPSEST_LINK_TITLE = "Read in Palimpsest"
 # zotdav fast-path store (server profile). The Zotero WebDAV file-sync target: each
 # stored attachment appears here as {KEY}.zip + {KEY}.prop. Empty/unused on mac profile.
 ZOTDAV_PATH = os.environ.get("ZOTDAV_PATH", "/media/external/zotdav/data/zotero")
@@ -1603,27 +1607,34 @@ class DEVONzotService:
         return None
 
     def _parent_has_devonthink_link(self, parent_key: str) -> bool:
-        """Check if a parent item already has a linked_url child with x-devonthink-item://."""
+        """Check if a parent item already has any DEVONthink/Palimpsest linked_url child."""
         return self._find_devonthink_link(parent_key) is not None
 
-    def _create_devonthink_child_link(self, parent_key: str, dt_uuid: str,
-                                       title: str = "DEVONthink Link",
-                                       dry_run=False, is_epub: bool = False) -> bool:
-        """Create a linked_url child attachment with a UUID callback URL.
+    def _find_child_link_by_scheme(self, parent_key: str, scheme: str) -> Optional[dict]:
+        """Find an existing linked_url child whose URL uses exactly `scheme`."""
+        prefix = f'{scheme}://'
+        for api_item in self.zotero_api._get_all_attachments_cached():
+            data = api_item.get('data', {})
+            url = data.get('url', '') or ''
+            if (data.get('parentItem') == parent_key
+                    and data.get('linkMode') == 'linked_url'
+                    and url.startswith(prefix)):
+                return api_item
+        return None
 
-        PDFs/other → x-devonthink-item://; EPUBs (is_epub=True) → x-palimpsest-item://.
-        The UUID is identical either way — only the scheme (and the generic title) differ.
-        Checks for duplicates before creating (both schemes). Renames existing links if
-        still using the generic default title.
+    def _ensure_child_link(self, parent_key: str, dt_uuid: str, scheme: str,
+                           title: str, dry_run: bool = False) -> bool:
+        """Ensure the parent has one linked_url child for `scheme` (create if missing).
+
+        Idempotent per scheme: if a child for this scheme already exists it is kept (only
+        renamed when it still carries a generic placeholder title and a real one is now
+        available). Different schemes are independent children, so this never removes or
+        collides with the other scheme's link.
         """
-        scheme = PALIMPSEST_LINK_SCHEME if is_epub else DEVONTHINK_LINK_SCHEME
-        default_title = "Palimpsest Link" if is_epub else "DEVONthink Link"
-        if title == "DEVONthink Link" and is_epub:
-            title = default_title
-        existing = self._find_devonthink_link(parent_key)
+        existing = self._find_child_link_by_scheme(parent_key, scheme)
         if existing:
             existing_data = existing.get('data', {})
-            generic_titles = ("DEVONthink Link", "Palimpsest Link")
+            generic_titles = ("DEVONthink Link", "Palimpsest Link", PALIMPSEST_LINK_TITLE)
             if existing_data.get('title') in generic_titles and title not in generic_titles:
                 att_key = existing_data.get('key')
                 version = existing_data.get('version', 0)
@@ -1641,11 +1652,11 @@ class DEVONzotService:
                 else:
                     logger.info(f"[DRY RUN] Would rename link {att_key} → {title}")
             else:
-                logger.info(f"Parent {parent_key} already has DEVONthink link — skipping")
+                logger.info(f"Parent {parent_key} already has {scheme}:// link — skipping")
             return True
 
         if dry_run:
-            logger.info(f"[DRY RUN] Would create {default_title} child for {parent_key}")
+            logger.info(f"[DRY RUN] Would create {scheme}:// child for {parent_key} ('{title}')")
             return True
 
         results = self.zotero_api.create_url_attachments([{
@@ -1655,11 +1666,27 @@ class DEVONzotService:
         }])
 
         if results and results[0].get('new_key'):
-            logger.info(f"Created DEVONthink Link child {results[0]['new_key']} for {parent_key}")
+            logger.info(f"Created {scheme}:// child {results[0]['new_key']} for {parent_key}")
             return True
         else:
-            logger.error(f"Failed to create DEVONthink Link child for {parent_key}")
+            logger.error(f"Failed to create {scheme}:// child for {parent_key}")
             return False
+
+    def _create_devonthink_child_link(self, parent_key: str, dt_uuid: str,
+                                       title: str = "DEVONthink Link",
+                                       dry_run=False, is_epub: bool = False) -> bool:
+        """Ensure the parent's UUID callback link(s) exist in Zotero.
+
+        Every item gets a DEVONthink link (x-devonthink-item://). EPUBs ALSO get a
+        Palimpsest link (x-palimpsest-item://, same UUID) as a SECOND linked_url child, so
+        a click can open the book in either app. Both are idempotent per scheme.
+        """
+        ok = self._ensure_child_link(parent_key, dt_uuid, DEVONTHINK_LINK_SCHEME, title, dry_run)
+        if is_epub:
+            ok = self._ensure_child_link(
+                parent_key, dt_uuid, PALIMPSEST_LINK_SCHEME, PALIMPSEST_LINK_TITLE, dry_run
+            ) and ok
+        return ok
 
     def delete_imported_url_attachments(self, dry_run=False, interactive=False) -> Dict[str, int]:
         """Phase 0: Delete all imported_url (linkMode=1) attachments.
